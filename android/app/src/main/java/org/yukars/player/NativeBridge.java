@@ -9,5 +9,8 @@ final class NativeBridge {
     static native void tick(long session);
     static native void render(long session, int[] argbPixels);
     static native String state(long session);
+    static native int[] image(long session, String resource, int sequence);
+    static native String saveInfo(long session, String absolutePath);
+    static native int[] saveThumbnail(long session, String absolutePath);
     static native void destroy(long session);
 }

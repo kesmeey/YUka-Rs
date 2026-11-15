@@ -4,14 +4,14 @@
 
 ## 完整游戏 APK
 
-`bin/Loverable-Yuka-Rs-0.2.1.apk` 的目标包名为 `org.yukars.loverable`。资源准备与构建命令见项目 README。
+`bin/Loverable-Yuka-Rs-0.2.2.apk` 的目标包名为 `org.yukars.loverable`。资源准备与构建命令见项目 README。
 APK 携带五个原 YKC 包的 XZ preset 3 无损压缩数据，首次启动自动流式解包并验证原文件长度与 SHA-256。
 完整资源目录为 `/data/user/0/org.yukars.loverable/files/game-bundled-loverable-cn`，其下的 `Save` 使用原版二进制格式。
 
 将 APK 复制到设备并安装后，打开“情侣热恋中”，等待资源准备完成并进入标题。ADB 安装和启动命令如下。
 
 ```powershell
-adb -s emulator-5580 install -r .\bin\Loverable-Yuka-Rs-0.2.1.apk
+adb -s emulator-5580 install -r .\bin\Loverable-Yuka-Rs-0.2.2.apk
 adb -s emulator-5580 shell am start -n org.yukars.loverable/org.yukars.player.MainActivity
 ```
 
@@ -20,7 +20,7 @@ adb -s emulator-5580 shell am start -n org.yukars.loverable/org.yukars.player.Ma
 
 ```powershell
 $bundleTest = @{
-    Apk = '.\bin\Loverable-Yuka-Rs-0.2.1.apk'
+    Apk = '.\bin\Loverable-Yuka-Rs-0.2.2.apk'
     SdkPlatform = '.\target\android-sdk\android-35'
     BuildTools = '.\target\android-sdk\android-15'
     JavaHome = 'E:\DevEco Studio\jbr'
@@ -40,11 +40,44 @@ $bundleTest = @{
 ```powershell
 .\android\test.ps1 @bundleTest -Runner SmokeInstrumentation
 .\android\test.ps1 @bundleTest -Runner AudioFocusInstrumentation
+.\android\test.ps1 @bundleTest -Runner OriginalUiInstrumentation
 ```
 
 `-TargetPackage` 用于生成测试 APK 的目标包配置，测试代码的类名仍位于 `org.yukars.player`。
 `-OriginalSave` 可传入设备上目标应用 UID 可读的 PC 原版剧情档路径，扩展验证读取、再保存和继续剧情。
 完整 APK 的安装、首次启动和资源一致性实测结果记录如下。
+
+### 原版 UI 0.2.2 回归
+
+完整 APK 为 3,141,522,392 字节，SHA-256 为
+`295EA4DD920E467E91DECEADC4F68867E8CB6BEACA8BF8A04478189699B20B9D`。
+通用播放器 APK 为 4,715,040 字节，SHA-256 为
+`47796B1B66900335AC217ACD03B1900AD67AC2D3C4E1EDAA8D645AE6AC292E5E`。
+两者均包含 ARM64 和 x86_64，通过 v2/v3 签名及16 KiB对齐校验。完整 APK 已在 Android 15 模拟器安装。
+
+`OriginalUiInstrumentation` 在独立缓存目录创建测试存档，仅读取输入的 PC 存档。
+本机 Android 15 x86_64 测试覆盖 195 张原图/序列、131 个完整像素裁切对照、
+原版存档 metadata 与 100×75 缩略图、中文备注写入读回、20页槽位编号、
+损坏槽位隔离、损坏缩略图的正常存档加载，以及 Canvas 像素和触摸位置。
+
+原 PC 程序在私有 Windows 桌面的隔离副本中提供对照截图。依据为 `m_save.yks`、`m_load.yks`、
+`m_YesNo.yks`、`createText.yks` 和 `createMemu.yks`，资源来自原 YKC 文件。
+实测图片和日志位于 `evidence/original-ui/` 与 `evidence/android-original-ui/`。
+
+实际 Activity 点击检查覆盖标题、备注键盘、保存、覆盖取消、001自动槽写保护、
+第二页写入011、存读档页切换、999快速档、后台保存及重启后保留页码。
+自绘 GameView 关闭 Android 默认焦点高亮，以保持备注输入完成后的原图颜色。
+`SmokeInstrumentation` 覆盖 PC 回存021继续剧情及选择006两个分支，音频焦点和随包资源回归通过。
+
+最终 APK 从新游戏进入后，通过手机键盘和原版保存页生成011槽，备注为 `Android_UI_022_final`。
+该文件 SHA-256 为 `45556A06C9C0988F7C759C809D8FB84F16ED6E10044DC47939B4516109B6C5FC`。
+原版 PC 菜单显示正确备注、章节、日期和缩略图，读取后当前中文、消息框、姓名框和九个菜单按钮正常。
+通过原版读档确认再次加载并推进，脚本等待位置从47到54，下一句中文正常。
+对应日志和截图使用 `evidence/android-original-ui/final-apk-native-` 前缀。
+五次最终 instrumentation 均返回 `INSTRUMENTATION_CODE: -1`，Activity 的11项实测检查全部通过。
+
+设置/鉴赏、自动阅读/已读快进/履历、字体替代和菜单动画的实现边界见 README。
+ARM64 已交叉编译，真实手机仍待验证。
 
 ### 完整游戏 APK 0.2.1 实测记录
 
@@ -86,7 +119,7 @@ OP 视频及特效实现边界继续适用，具体见项目 README。
 
 ```powershell
 $test = @{
-    Apk = '.\bin\Yuka-Rs-0.2.1.apk'
+    Apk = '.\bin\Yuka-Rs-0.2.2.apk'
     SdkPlatform = '.\target\android-sdk\android-35'
     BuildTools = '.\target\android-sdk\android-15'
     JavaHome = 'E:\DevEco Studio\jbr'

@@ -82,9 +82,29 @@ Completed scrolling can leave velocity doubles in layer fields `0x90` and `0x98`
 
 Drawables use `0x78`-byte headers. Type 3 is text. The native reader at `0x415392` selects either the one/two-byte character at `0x3c` or a string addressed by `0x54` and `0x58`, then constructs it through `0x4080f0` or `0x408170`. Text-layer UI records from imported snapshots are retained by the exporter.
 
-Export reconstructs ordinary body and speaker glyphs using the supplied game's 25-pixel font metrics, 13-pixel single-byte advance and 32-pixel line spacing. The runtime uses its own font renderer, so glyph shape and layout fidelity remain bounded by that renderer. Import derives logical line breaks from stored glyph coordinates and the text-window boundary. A line break exactly coincident with automatic wrapping is ambiguous in the native glyph representation. Layer translation is applied once when converting between glyph-local coordinates and scene offsets.
+Fresh snapshots reconstruct the supplied game's `createText.yks` and `createMemu.yks` setup. Layers 11 and 12 contain the original message and name images at `(3, 473)` and `(0, 437)`, with transmittance 300. Hidden layers 101–103 supply the menu sprite sheets. Layer 13 retains the nine original normal-state menu sprites, their native frame records, and the key-wait icon position. Their visibility follows `showWindow`, including the empty name frame during narration. Existing imported layer visibility and menu records are retained. The name layer's `GraphicTextRect` has height 40, while the dialogue layer retains its original text-window bottom of 600.
+
+Export reconstructs ordinary body and speaker glyphs using a 25-pixel double-byte advance, 13-pixel single-byte advance and 32-pixel line spacing. The saved bitmap bounds include the original glyph padding, producing 29×28 bounds for a double-byte glyph. Native drawable fields `0x30`, `0x64`, and `0x6c` use the verified ordinary-story zero defaults, with `0x68` set to `-1`. These fields and bounds were compared with a Chinese dialogue slot written by the original executable. Encoded characters retain the original inline representation at `0x3c`. An isolated original executable loaded the corrected fresh snapshot with readable Chinese dialogue, the original windows and all nine menu buttons, then reloaded through its own Load menu and continued to the next dialogue. The runtime uses its own font renderer, so glyph shape and layout fidelity remain bounded by that renderer. Import derives logical line breaks from stored glyph coordinates and the text-window boundary. A line break exactly coincident with automatic wrapping is ambiguous in the native glyph representation. Layer translation is applied once when converting between glyph-local coordinates and scene offsets.
 
 Stable cropped layers and live child sprites currently cannot be exported. The regular save eligibility check also excludes active scene and audio transitions. The thumbnail is a 100×75, 24-bit BMP of 22,554 bytes.
+
+## Android menu previews
+
+The Android save/load pages follow the supplied game's `m_save.yks`, `m_load.yks`, and `m_YesNo.yks`.
+Each of twenty pages contains five rows. The file number is `pageIndex * 10 + row`, with row ranging from one to five.
+Slot 001 is the automatic save, and `q_save.yks` / `q_load.yks` use slot 999. Android retains a read fallback for the earlier host's slot 099.
+GlobalFlag85 and GlobalFlag86 retain the last page and row in the original System.dat.
+
+`NativeSavePreview` reads the 0x48-byte container header and bounded referenced fields through `Read + Seek`.
+The menu shows the chapter as TITLE, the comment as MEMO, the file modification time as TIME, and the original BMP thumbnail.
+It requests five slots when opening or changing pages. A thumbnail decode error retains readable slot metadata and allows the full loader to validate the state.
+Text fields are limited to 64 KiB and the thumbnail to 16 MiB during preview decoding.
+The full native state loader still validates the complete VM snapshot on restoration.
+
+Manual remarks are encoded with the existing native text codec before writing. Default manual and quick-save remarks are empty.
+Original UI pictures stay in their YKC archives. JNI exposes decoded ARGB images and a validated first frame for each requested sprite sequence.
+Android excludes layers 11–14 while composing the scene, then draws the message window and text at the original UI coordinates.
+The original layers remain available to native save export. Android uses a substitute system font and the original default window opacity.
 
 ## Audio
 

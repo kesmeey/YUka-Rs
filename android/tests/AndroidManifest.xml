@@ -14,4 +14,6 @@
         android:targetPackage="org.yukars.player" android:label="Yuka RS foreground audio focus" />
     <instrumentation android:name="org.yukars.player.BundledGameInstrumentation"
         android:targetPackage="org.yukars.player" android:label="Yuka RS bundled resource installation" />
+    <instrumentation android:name="org.yukars.player.OriginalUiInstrumentation"
+        android:targetPackage="org.yukars.player" android:label="Yuka RS original save menu integration" />
 </manifest>

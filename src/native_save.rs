@@ -1,7 +1,10 @@
 //! Original Yuka save containers and their absolute-offset binary records.
 //! The address profile and field evidence are recorded in docs/native-save.md.
 use crate::Result;
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::{Read, Seek, SeekFrom},
+};
 
 const SLOT_HEADER: usize = 0x48;
 const STATE_HEADER: usize = 0x15c;
@@ -113,6 +116,67 @@ pub struct NativeSave {
     pub state_extra_strings: [Vec<u8>; 2],
     pub auxiliary: [Vec<u8>; 2],
     original: Option<Original>,
+}
+
+/// Menu fields read without loading the serialized VM, graphics or audio state.
+#[derive(Debug)]
+pub struct NativeSavePreview {
+    pub comment: Vec<u8>,
+    pub chapter: Vec<u8>,
+    pub window: Vec<u8>,
+    pub thumbnail: Vec<u8>,
+    pub has_thumbnail: bool,
+}
+
+impl NativeSavePreview {
+    pub fn read(reader: &mut (impl Read + Seek), include_thumbnail: bool) -> Result<Self> {
+        let file_size = reader.seek(SeekFrom::End(0))?;
+        reader.seek(SeekFrom::Start(0))?;
+        let mut header = [0; SLOT_HEADER];
+        reader.read_exact(&mut header)?;
+        if header.get(..7) != Some(b"Yuka  \0") || read_u32(&header, 8)? != SLOT_HEADER as u32 {
+            return Err("unsupported original Yuka slot header".into());
+        }
+        // Validate container ranges, including the skipped state, without reading them.
+        for field in [0x10, 0x18, 0x20, 0x28, 0x30, 0x38, 0x40] {
+            let offset = u64::from(read_u32(&header, field)?);
+            let length = u64::from(read_u32(&header, field + 4)?);
+            if offset > file_size || length > file_size - offset {
+                return Err("native preview section outside file".into());
+            }
+        }
+        let comment = cstring(&read_preview_section(reader, &header, 0x10, 65536)?)?;
+        let chapter = cstring(&read_preview_section(reader, &header, 0x18, 65536)?)?;
+        let window = cstring(&read_preview_section(reader, &header, 0x40, 65536)?)?;
+        let thumbnail = if include_thumbnail {
+            read_preview_section(reader, &header, 0x30, 16 * 1024 * 1024)?
+        } else {
+            Vec::new()
+        };
+        Ok(Self {
+            comment,
+            chapter,
+            window,
+            thumbnail,
+            has_thumbnail: read_u32(&header, 0x34)? != 0,
+        })
+    }
+}
+
+fn read_preview_section(
+    reader: &mut (impl Read + Seek),
+    header: &[u8],
+    field: usize,
+    maximum: usize,
+) -> Result<Vec<u8>> {
+    let length = read_u32(header, field + 4)? as usize;
+    if length > maximum {
+        return Err("native preview section exceeds its allocation limit".into());
+    }
+    let mut bytes = vec![0; length];
+    reader.seek(SeekFrom::Start(u64::from(read_u32(header, field)?)))?;
+    reader.read_exact(&mut bytes)?;
+    Ok(bytes)
 }
 
 impl Default for NativeSave {

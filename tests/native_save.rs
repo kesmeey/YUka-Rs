@@ -3,9 +3,75 @@ use yuka_rs::{
     Result,
     native_save::{
         AlreadyDat, AlreadyEntry, NativeDrawable, NativeFrame, NativeLayer, NativeSave,
-        NativeValue, SystemDat, read_u32, write_u32,
+        NativeSavePreview, NativeValue, SystemDat, read_u32, write_u32,
     },
 };
+
+#[test]
+fn native_preview_reads_only_the_requested_container_fields() -> Result<()> {
+    use std::io::{Cursor, Read, Seek, SeekFrom};
+    struct CountedReader<'a> {
+        cursor: Cursor<&'a [u8]>,
+        bytes_read: usize,
+    }
+    impl Read for CountedReader<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.cursor.read(buffer)?;
+            self.bytes_read += count;
+            Ok(count)
+        }
+    }
+    impl Seek for CountedReader<'_> {
+        fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+            self.cursor.seek(position)
+        }
+    }
+    let mut save = NativeSave::default();
+    save.comment = encoding_rs::GBK.encode("原版正文").0.into_owned();
+    save.chapter = b"chapter 1".to_vec();
+    save.window = b"window".to_vec();
+    save.thumbnail = vec![7; 22554];
+    let bytes = save.to_bytes()?;
+    let mut reader = CountedReader {
+        cursor: Cursor::new(&bytes),
+        bytes_read: 0,
+    };
+    let preview = NativeSavePreview::read(&mut reader, false)?;
+    assert_eq!(preview.comment, save.comment);
+    assert_eq!(preview.chapter, save.chapter);
+    assert_eq!(preview.window, save.window);
+    assert!(preview.has_thumbnail);
+    assert!(preview.thumbnail.is_empty());
+    let metadata_bytes = 0x48 + save.comment.len() + save.chapter.len() + save.window.len() + 3;
+    assert_eq!(reader.bytes_read, metadata_bytes);
+    reader.bytes_read = 0;
+    let preview = NativeSavePreview::read(&mut reader, true)?;
+    assert_eq!(preview.thumbnail, save.thumbnail);
+    assert_eq!(reader.bytes_read, metadata_bytes + save.thumbnail.len());
+    Ok(())
+}
+
+#[test]
+fn native_preview_rejects_bad_ranges_and_unbounded_metadata() -> Result<()> {
+    use std::io::Cursor;
+    let mut save = NativeSave::default();
+    save.comment = b"caption".to_vec();
+    let bytes = save.to_bytes()?;
+    for cut in [0, 7, 0x47, bytes.len() - 1] {
+        assert!(NativeSavePreview::read(&mut Cursor::new(&bytes[..cut]), false).is_err());
+    }
+    let mut corrupt = bytes.clone();
+    write_u32(&mut corrupt, 0x20, u32::MAX)?;
+    assert!(NativeSavePreview::read(&mut Cursor::new(&corrupt), false).is_err());
+    let mut corrupt = bytes.clone();
+    write_u32(&mut corrupt, 0x14, 65537)?;
+    assert!(NativeSavePreview::read(&mut Cursor::new(&corrupt), false).is_err());
+    let mut corrupt = bytes;
+    let comment = read_u32(&corrupt, 0x10)? as usize;
+    corrupt[comment + save.comment.len()] = 1;
+    assert!(NativeSavePreview::read(&mut Cursor::new(&corrupt), false).is_err());
+    Ok(())
+}
 
 #[test]
 fn native_records_relocate_after_edits() -> Result<()> {
@@ -118,6 +184,11 @@ fn original_saves_roundtrip_and_rebuild() -> Result<()> {
     let game = PathBuf::from(std::env::var_os("YUKA_GAME_DIR").ok_or("set YUKA_GAME_DIR")?);
     let original = fs::read(game.join("Save/savedata.001"))?;
     let mut save = NativeSave::parse(&original)?;
+    let preview = NativeSavePreview::read(&mut std::io::Cursor::new(&original), true)?;
+    assert_eq!(preview.comment, save.comment);
+    assert_eq!(preview.chapter, save.chapter);
+    assert_eq!(preview.window, save.window);
+    assert_eq!(preview.thumbnail, save.thumbnail);
     assert_eq!(save.frames.len(), 2);
     assert_eq!(save.layers.len(), 15);
     assert_eq!(save.sounds.len(), 5);

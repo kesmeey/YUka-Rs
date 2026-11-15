@@ -108,7 +108,7 @@ try {
         Invoke-Checked "$JavaHome/bin/keytool.exe" @('-genkeypair', '-keystore', $keystore, '-storepass', 'android', '-keypass', 'android', '-alias', 'yuka-rs', '-keyalg', 'RSA', '-keysize', '2048', '-validity', '10000', '-dname', 'CN=Yuka-Rs Development', '-noprompt')
     }
     Invoke-Checked "$BuildTools/zipalign.exe" @('-f', '-P', '16', '4', "$output/unsigned.apk", "$output/aligned.apk")
-    $apkName = if ($bundled) { 'Loverable-Yuka-Rs-0.2.1.apk' } else { 'Yuka-Rs-0.2.1.apk' }
+    $apkName = if ($bundled) { 'Loverable-Yuka-Rs-0.2.2.apk' } else { 'Yuka-Rs-0.2.2.apk' }
     $apk = Join-Path $delivery $apkName
     Invoke-Checked "$BuildTools/apksigner.bat" @('sign', '--ks', $keystore, '--ks-key-alias', 'yuka-rs', '--ks-pass', 'pass:android', '--key-pass', 'pass:android', '--out', $apk, "$output/aligned.apk")
     Invoke-Checked "$BuildTools/apksigner.bat" @('verify', '--verbose', $apk)

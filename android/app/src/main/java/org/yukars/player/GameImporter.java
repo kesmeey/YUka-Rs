@@ -177,6 +177,11 @@ final class GameImporter {
             }
             output.getFD().sync();
         }
+        // The original menu displays filesystem mtime as the slot's save date.
+        try (Cursor cursor = resolver.query(source, new String[]{DocumentsContract.Document.COLUMN_LAST_MODIFIED}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst() && !cursor.isNull(0) && cursor.getLong(0) > 0)
+                destination.setLastModified(cursor.getLong(0));
+        } catch (RuntimeException ignored) { /* Some document providers do not expose a timestamp. */ }
         progress.update("已导入 " + label);
     }
 

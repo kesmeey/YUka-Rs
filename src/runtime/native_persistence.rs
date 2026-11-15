@@ -94,7 +94,7 @@ impl NativeSelection {
     }
 }
 
-fn native_text(bytes: &[u8], encoding: TextEncoding) -> Result<String> {
+pub(super) fn native_text(bytes: &[u8], encoding: TextEncoding) -> Result<String> {
     let (text, errors) = match encoding {
         TextEncoding::Gbk => encoding_rs::GBK.decode_without_bom_handling(bytes),
         TextEncoding::ShiftJis => encoding_rs::SHIFT_JIS.decode_without_bom_handling(bytes),
@@ -149,6 +149,93 @@ fn layer_kind(layer: &Layer) -> u32 {
     } else {
         1
     }
+}
+
+/// Recreate the supplied game's createText/createMemu setup for fresh sessions.
+fn complete_dialogue_ui(save: &mut NativeSave, visible: bool) -> Result<()> {
+    for (slot, path, x, y, shown, transparency) in [
+        (11, "window\\window", 3, 473, visible, 300),
+        (12, "window\\name", 0, 437, visible, 300),
+        (13, "damy", 0, 0, visible, 0),
+        (14, "damy", 0, 0, visible, 0),
+        (101, "window\\sys_btn01", 0, 0, false, 0),
+        (102, "window\\sys_btn02", 0, 0, false, 0),
+        (103, "window\\sys_btn_help", 0, 0, false, 0),
+    ] {
+        if save
+            .layers
+            .iter()
+            .any(|layer| signed(&layer.header, 8).ok() == Some(slot))
+        {
+            continue;
+        }
+        let mut layer = default_layer(slot)?;
+        layer.image_path = format!("ykg\\system\\{path}.ykg").into_bytes();
+        for (offset, value) in [
+            (0x0c, 2),
+            (0x20, x),
+            (0x24, y),
+            (0x28, u32::from(shown)),
+            (0x74, transparency),
+        ] {
+            write_u32(&mut layer.header, offset, value)?;
+        }
+        save.layers.push(layer);
+    }
+    let text = save
+        .layers
+        .iter_mut()
+        .find(|layer| signed(&layer.header, 8).ok() == Some(13))
+        .unwrap();
+    if text
+        .items
+        .iter()
+        .any(|item| read_u32(&item.header, 8).ok() == Some(1))
+    {
+        return Ok(());
+    }
+    for (offset, value) in [(0x4c, 730), (0x50, 555), (0x54, 1)] {
+        write_u32(&mut text.header, offset, value)?;
+    }
+    for (id, source, sequence, x, y, sx, sy, width, height) in [
+        (0, 101, 0, 388, 580, 0, 0, 74, 19),
+        (1, 101, 1, 462, 580, 74, 0, 74, 19),
+        (2, 101, 2, 536, 580, 148, 0, 74, 19),
+        (3, 101, 3, 610, 580, 222, 0, 74, 19),
+        (4, 101, 4, 684, 580, 296, 0, 74, 19),
+        (5, 102, 0, 761, 497, 0, 0, 39, 21),
+        (6, 102, 1, 761, 520, 0, 21, 39, 21),
+        (7, 102, 2, 761, 543, 0, 42, 39, 21),
+        (8, 102, 3, 761, 566, 0, 63, 39, 21),
+    ] {
+        let mut item = NativeDrawable::default();
+        for (offset, value) in [
+            (8, 1),
+            (0x0c, 1),
+            (0x10, x),
+            (0x14, y),
+            (0x18, width),
+            (0x1c, height),
+            (0x20, sx),
+            (0x24, sy),
+            (0x28, sx + width),
+            (0x2c, sy + height),
+            (0x30, i32::MAX as u32),
+            (0x34, source),
+            (0x38, 1),
+            (0x48, sequence),
+            (0x5c, id),
+            (0x60, 1),
+        ] {
+            write_u32(&mut item.header, offset, value)?;
+        }
+        item.extra = [sx, sy, width, height, 0, 1, 0, 0]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        text.items.push(item);
+    }
+    Ok(())
 }
 
 fn text_from_layer(layer: &NativeLayer, encoding: TextEncoding) -> Result<String> {
@@ -216,18 +303,15 @@ fn put_text(
         write_u32(&mut item.header, 0x0c, 1)?;
         write_u32(&mut item.header, 0x10, x as u32)?;
         write_u32(&mut item.header, 0x14, y as u32)?;
-        write_u32(&mut item.header, 0x18, advance as u32)?;
-        write_u32(&mut item.header, 0x1c, 25)?;
-        write_u32(&mut item.header, 0x28, advance as u32)?;
-        write_u32(&mut item.header, 0x2c, 25)?;
-        write_u32(&mut item.header, 0x30, i32::MAX as u32)?;
+        write_u32(&mut item.header, 0x18, (advance + 4) as u32)?;
+        write_u32(&mut item.header, 0x1c, 28)?;
+        write_u32(&mut item.header, 0x28, (advance + 4) as u32)?;
+        write_u32(&mut item.header, 0x2c, 28)?;
         write_u32(&mut item.header, 0x34, u32::MAX)?;
         item.header[0x3c..0x3c + bytes.len()].copy_from_slice(&bytes);
         write_u32(&mut item.header, 0x40, u32::from(name))?;
         write_u32(&mut item.header, 0x44, 0xffffff)?;
-        write_u32(&mut item.header, 0x64, 0x030303)?;
         write_u32(&mut item.header, 0x68, u32::MAX)?;
-        write_u32(&mut item.header, 0x6c, u32::MAX)?;
         layer.items.push(item);
         x += advance;
     }
@@ -240,15 +324,20 @@ fn put_text(
         0x44,
         (origin.0 + offset.0 + width) as u32,
     )?;
-    write_u32(&mut layer.header, 0x48, 600)?;
+    write_u32(&mut layer.header, 0x48, if name { 40 } else { 600 })?;
     Ok(())
 }
 
 impl Runtime {
     pub fn save_native(&self, path: &Path) -> Result<()> {
+        self.save_native_with_comment(path, "")
+    }
+
+    pub fn save_native_with_comment(&self, path: &Path, comment: &str) -> Result<()> {
         if !self.can_save() {
             return Err("native saves require a stable dialogue or choice boundary".into());
         }
+        let comment = encode_native(comment, self.encoding)?;
         let mut save = self.native_template.clone().unwrap_or_default();
         if self.native_template.is_none() {
             for (offset, value) in [(0x34, 1), (0x38, 1), (0xc0, 255), (0x154, 0x7ff)] {
@@ -401,6 +490,7 @@ impl Runtime {
             );
             put_text(layer, text, self.encoding, name, local_offset)?;
         }
+        complete_dialogue_ui(&mut save, self.scene.dialogue_visible)?;
         save.layers
             .sort_by_key(|layer| signed(&layer.header, 8).unwrap_or_default());
         save.sounds.clear();
@@ -420,7 +510,7 @@ impl Runtime {
         save.window = encode_native(&self.window_title, self.encoding)?;
         save.state_extra_strings[1] = encode_native(&self.page_voice_paths, self.encoding)?;
         self.native_selection.write(&mut save.state_header)?;
-        save.comment = b"YUka-Rs".to_vec();
+        save.comment = comment;
         save.thumbnail = super::native_thumbnail::thumbnail(&self.scene);
         let timer_now = self.paused_at.unwrap_or_else(Instant::now);
         for id in 0..16 {
@@ -652,6 +742,76 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_native_dialogue_ui_preserves_windows_and_menu_sprites() -> Result<()> {
+        let mut save = NativeSave::default();
+        complete_dialogue_ui(&mut save, true)?;
+        assert_eq!(save.layers.len(), 7);
+        for (slot, x, y, visibility, transparency) in [
+            (11, 3, 473, 1, 300),
+            (12, 0, 437, 1, 300),
+            (101, 0, 0, 0, 0),
+            (102, 0, 0, 0, 0),
+            (103, 0, 0, 0, 0),
+        ] {
+            let layer = save
+                .layers
+                .iter()
+                .find(|layer| signed(&layer.header, 8).ok() == Some(slot))
+                .unwrap();
+            for (offset, expected) in [
+                (0x20, x),
+                (0x24, y),
+                (0x28, visibility),
+                (0x74, transparency),
+            ] {
+                assert_eq!(read_u32(&layer.header, offset)?, expected);
+            }
+        }
+        let text = save
+            .layers
+            .iter_mut()
+            .find(|layer| signed(&layer.header, 8).ok() == Some(13))
+            .unwrap();
+        assert_eq!(text.items.len(), 9);
+        for (id, item) in text.items.iter().enumerate() {
+            assert_eq!(read_u32(&item.header, 8)?, 1);
+            assert_eq!(read_u32(&item.header, 0x5c)?, id as u32);
+            assert_eq!(item.extra.len(), 32);
+            assert_eq!(read_u32(&item.extra, 20)?, 1);
+        }
+        put_text(text, "总有一天\n中文", TextEncoding::Gbk, false, (0, 0))?;
+        assert_eq!(text.items.len(), 15);
+        assert_eq!(text_from_layer(text, TextEncoding::Gbk)?, "总有一天\n中文");
+        let glyph = &text.items[9];
+        assert!(glyph.text.is_empty());
+        assert_eq!(
+            &glyph.header[0x3c..0x3e],
+            encoding_rs::GBK.encode("总").0.as_ref()
+        );
+        assert_eq!(read_u32(&glyph.header, 0x18)?, 29);
+        assert_eq!(read_u32(&glyph.header, 0x1c)?, 28);
+        for offset in [0x30, 0x64, 0x6c] {
+            assert_eq!(read_u32(&glyph.header, offset)?, 0);
+        }
+        let name = save
+            .layers
+            .iter_mut()
+            .find(|layer| signed(&layer.header, 8).ok() == Some(14))
+            .unwrap();
+        put_text(name, "名字", TextEncoding::Gbk, true, (0, 0))?;
+        assert_eq!(read_u32(&name.header, 0x48)?, 40);
+        let original = save.to_bytes()?;
+        complete_dialogue_ui(&mut save, false)?;
+        assert_eq!(save.to_bytes()?, original);
+        let restored = NativeSave::parse(&original)?;
+        assert_eq!(
+            text_from_layer(&restored.layers[2], TextEncoding::Gbk)?,
+            "总有一天\n中文"
+        );
+        Ok(())
+    }
 
     #[test]
     #[ignore = "requires the original game through YUKA_TEST_GAME"]

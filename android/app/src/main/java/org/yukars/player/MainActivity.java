@@ -26,8 +26,12 @@ import android.view.View;
 import android.view.WindowManager;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
+import android.view.inputmethod.InputMethodManager;
 import android.window.OnBackInvokedDispatcher;
 import android.widget.Toast;
+import android.widget.EditText;
+import android.widget.FrameLayout;
+import android.util.TypedValue;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -53,6 +57,11 @@ public final class MainActivity extends Activity {
     private long session;
     private final int[] pixels = new int[WIDTH * HEIGHT];
     private GameView gameView;
+    private FrameLayout gameContainer;
+    private EditText remarkField;
+    private OriginalSaveMenu slotMenu;
+    private Mode slotReturnMode;
+    private int slotRequest;
     private SharedPreferences preferences;
     private volatile boolean destroyed;
     private volatile boolean background;
@@ -73,7 +82,21 @@ public final class MainActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         preferences = getSharedPreferences("player", MODE_PRIVATE);
         gameView = new GameView();
-        setContentView(gameView);
+        gameContainer = new FrameLayout(this);
+        gameContainer.addView(gameView);
+        remarkField = new EditText(this);
+        remarkField.setSingleLine(true);
+        remarkField.setPadding(0, 0, 0, 0);
+        remarkField.setTextColor(Color.WHITE);
+        remarkField.setBackgroundColor(Color.TRANSPARENT);
+        remarkField.setIncludeFontPadding(false);
+        remarkField.setImeOptions(android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI
+            | android.view.inputmethod.EditorInfo.IME_ACTION_DONE);
+        remarkField.setOnEditorActionListener((view, action, event) -> { hideKeyboard(); gameView.requestFocus(); return true; });
+        remarkField.setVisibility(View.GONE);
+        gameContainer.addView(remarkField);
+        setContentView(gameContainer);
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
         getWindow().getDecorView().post(this::immersive);
         if (Build.VERSION.SDK_INT >= 33)
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, this::navigateBack);
@@ -166,6 +189,7 @@ public final class MainActivity extends Activity {
             candidate = NativeBridge.create(directory.getAbsolutePath(), saves.getAbsolutePath(), cache.getAbsolutePath());
             if (candidate == 0) throw new IOException("引擎没有创建有效会话");
             NativeBridge.command(candidate, "title", "");
+            OriginalAssets originalAssets = OriginalAssets.load(candidate);
             if (session != 0) NativeBridge.destroy(session);
             audio.close();
             session = candidate;
@@ -175,7 +199,14 @@ public final class MainActivity extends Activity {
             nativeReady = true;
             engineFailed = false;
             preferences.edit().putString("game", directory.getAbsolutePath()).apply();
-            ui.post(() -> { mode = Mode.TITLE; message = ""; gameView.invalidate(); });
+            ui.post(() -> {
+                clearSlotMenu();
+                gameView.originalAssets = originalAssets;
+                gameView.hideText = false;
+                mode = Mode.TITLE;
+                message = "";
+                gameView.invalidate();
+            });
         } catch (Exception | LinkageError error) {
             if (candidate != 0) NativeBridge.destroy(candidate);
             showError(error);
@@ -191,8 +222,14 @@ public final class MainActivity extends Activity {
         engine.post(() -> {
             try {
                 call(operation, argument);
-                if (operation.equals("save") || operation.equals("load")) refreshSaves();
-                ui.post(() -> { actionPending = false; message = ""; if (success != null) success.run(); gameView.invalidate(); });
+                if (operation.equals("save") || operation.equals("save_with_comment") || operation.equals("load")) refreshSaves();
+                ui.post(() -> {
+                    actionPending = false;
+                    message = "";
+                    if (operation.equals("new") || operation.equals("load") || operation.equals("title")) gameView.hideText = false;
+                    if (success != null) success.run();
+                    gameView.invalidate();
+                });
             } catch (RuntimeException error) {
                 if (operation.equals("advance") || operation.equals("choose")) {
                     engineFailed = true;
@@ -217,6 +254,7 @@ public final class MainActivity extends Activity {
     }
 
     private void resumePlayback() {
+        clearSlotMenu();
         command("pause", "0", () -> {
             mode = Mode.PLAYING;
             engine.post(() -> audio.setLifecyclePaused(background));
@@ -239,11 +277,188 @@ public final class MainActivity extends Activity {
     }
 
     private void saveMenu() {
-        if (saveDirectory == null) return;
-        String[] labels = {"存档 2", "存档 3", "存档 4"};
-        new AlertDialog.Builder(this).setTitle("保存游戏")
-            .setItems(labels, (dialog, index) -> save(new File(saveDirectory, String.format(Locale.ROOT, "savedata.%03d", index + 2))))
-            .setNegativeButton("返回", null).show();
+        openSlotMenu(true);
+    }
+
+    private void loadMenu() {
+        openSlotMenu(false);
+    }
+
+    private void quickSave() {
+        if (saveDirectory != null) save(new File(saveDirectory, "savedata.999"));
+    }
+
+    private File quickSaveFile() {
+        if (saveDirectory == null) return null;
+        File current = new File(saveDirectory, "savedata.999");
+        if (current.isFile()) return current;
+        File legacy = new File(saveDirectory, "savedata.099");
+        return legacy.isFile() ? legacy : null;
+    }
+
+    private void quickLoad() {
+        File file = quickSaveFile();
+        if (file != null) load(file);
+        else toast("尚无快速存档");
+    }
+
+    private void openSlotMenu(boolean saving) {
+        if (saveDirectory == null || gameView.originalAssets == null || busy || actionPending) return;
+        if (saving && (!gameView.canSave() || engineFailed)) { toast("当前位置无法保存"); return; }
+        Mode returnMode = slotMenu == null ? mode : slotReturnMode;
+        int page = slotMenu == null ? gameView.stateInteger("save_page", 0) : slotMenu.page;
+        int row = slotMenu == null ? gameView.stateInteger("save_row", 1) : slotMenu.row;
+        command("pause", "1", () -> {
+            slotReturnMode = returnMode;
+            mode = Mode.PAUSED;
+            clearSlotMenu();
+            slotMenu = new OriginalSaveMenu(gameView.originalAssets, saving, page, row, new OriginalSaveMenu.Listener() {
+                public void page(int selected) { readSavePage(selected); }
+                public void slot(int selected) { selectSaveSlot(selected); }
+                public void confirm() { confirmSaveSlot(); }
+                public void cancel() { cancelSaveConfirmation(); }
+                public void action(OriginalSaveMenu.Action action) { saveMenuAction(action); }
+            });
+            readSavePage(page);
+        });
+    }
+
+    private void readSavePage(int page) {
+        OriginalSaveMenu menu = slotMenu;
+        if (menu == null) return;
+        menu.page = page;
+        menu.slots = null;
+        int request = ++slotRequest;
+        gameView.invalidate();
+        engine.post(() -> {
+            try {
+                NativeBridge.command(session, "save_selection", page + "," + menu.row);
+                OriginalSaveMenu.Slot[] slots = new OriginalSaveMenu.Slot[5];
+                for (int index = 0; index < slots.length; index++)
+                    slots[index] = OriginalSaveMenu.Slot.read(session, saveDirectory, page, index + 1);
+                ui.post(() -> {
+                    if (!destroyed && slotMenu == menu && request == slotRequest) {
+                        menu.slots = slots;
+                        gameView.invalidate();
+                    }
+                });
+            } catch (RuntimeException error) { showError(error); }
+        });
+    }
+
+    private void selectSaveSlot(int row) {
+        OriginalSaveMenu menu = slotMenu;
+        if (menu == null || menu.slots == null || busy || actionPending) return;
+        if (menu.saving && menu.page == 0 && row == 1) return;
+        OriginalSaveMenu.Slot slot = menu.slots[row - 1];
+        if (!menu.saving && !slot.exists) return;
+        if (!menu.saving && !slot.error.isEmpty()) { toast(slot.error); return; }
+        menu.row = row;
+        command("save_selection", menu.page + "," + row, () -> {
+            if (slotMenu != menu) return;
+            menu.confirmation = row - 1;
+            if (menu.saving) {
+                remarkField.setText("");
+                remarkField.setSelection(remarkField.length());
+                positionRemark();
+                remarkField.setVisibility(View.VISIBLE);
+                gameView.requestFocus();
+            }
+        });
+    }
+
+    private void confirmSaveSlot() {
+        OriginalSaveMenu menu = slotMenu;
+        if (menu == null || !menu.confirming()) return;
+        if (menu.navigation != null) {
+            if (menu.navigation == OriginalSaveMenu.Action.TITLE)
+                command("title", "", () -> { clearSlotMenu(); mode = Mode.TITLE; });
+            else if (menu.navigation == OriginalSaveMenu.Action.EXIT) finish();
+            else {
+                File previous = new File(saveDirectory, "savedata.000");
+                if (previous.isFile()) load(previous);
+                else { cancelSaveConfirmation(); toast("尚无前一个选择点的存档"); }
+            }
+            return;
+        }
+        File file = menu.slots[menu.confirmation].file;
+        if (!menu.saving) { load(file); return; }
+        try {
+            JSONObject argument = new JSONObject();
+            argument.put("path", file.getAbsolutePath());
+            argument.put("comment", remarkField.getText().toString());
+            command("save_with_comment", argument.toString(), () -> {
+                cancelSaveConfirmation();
+                readSavePage(menu.page);
+            });
+        } catch (org.json.JSONException error) { showError(error); }
+    }
+
+    private void cancelSaveConfirmation() {
+        if (slotMenu != null) { slotMenu.confirmation = -1; slotMenu.navigation = null; }
+        remarkField.setVisibility(View.GONE);
+        hideKeyboard();
+        gameView.requestFocus();
+        gameView.invalidate();
+    }
+
+    private void clearSlotMenu() {
+        slotMenu = null;
+        slotRequest++;
+        cancelSaveConfirmation();
+    }
+
+    private void closeSlotMenu() {
+        Mode previous = slotReturnMode;
+        clearSlotMenu();
+        if (previous == Mode.PLAYING) resumePlayback();
+        else { mode = previous; gameView.invalidate(); }
+    }
+
+    private void saveMenuAction(OriginalSaveMenu.Action action) {
+        switch (action) {
+            case SAVE: saveMenu(); break;
+            case LOAD: loadMenu(); break;
+            case OPTIONS: playerTools(); break;
+            case PREVIOUS_CHOICE:
+            case TITLE:
+            case EXIT:
+                slotMenu.navigation = action;
+                gameView.invalidate();
+                break;
+            case RETURN: closeSlotMenu(); break;
+            default: throw new IllegalArgumentException("Unknown save menu action");
+        }
+    }
+
+    private void playerTools() {
+        if (busy || actionPending) return;
+        if (mode == Mode.PLAYING) pauseMenu();
+        String[] labels = bundledMode
+            ? new String[]{"读取其他存档 / 导入 PC 存档", "导出完整 Save 目录", "返回标题"}
+            : new String[]{"读取其他存档 / 导入 PC 存档", "导出完整 Save 目录", "返回标题", "导入游戏文件夹", "切换已导入游戏"};
+        new AlertDialog.Builder(this).setTitle("安卓工具（原版选项设置仍在实现）")
+            .setItems(labels, (dialog, index) -> {
+                if (index == 0) savedFileMenu();
+                else if (index == 1) exportSaves();
+                else if (index == 2) command("title", "", () -> { clearSlotMenu(); mode = Mode.TITLE; });
+                else if (index == 3) pickGame();
+                else installedGames();
+            }).setNegativeButton("返回", null).show();
+    }
+
+    private void hideKeyboard() {
+        InputMethodManager keyboard = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        if (keyboard != null) keyboard.hideSoftInputFromWindow(remarkField.getWindowToken(), 0);
+    }
+
+    private void positionRemark() {
+        float scale = Math.min(gameView.getWidth() / (float) WIDTH, gameView.getHeight() / (float) HEIGHT);
+        FrameLayout.LayoutParams bounds = new FrameLayout.LayoutParams(Math.round(295 * scale), Math.round(22 * scale));
+        bounds.leftMargin = Math.round((gameView.getWidth() - WIDTH * scale) / 2 + 280 * scale);
+        bounds.topMargin = Math.round((gameView.getHeight() - HEIGHT * scale) / 2 + 307 * scale);
+        remarkField.setLayoutParams(bounds);
+        remarkField.setTextSize(TypedValue.COMPLEX_UNIT_PX, 18 * scale);
     }
 
     private void refreshSaves() {
@@ -256,7 +471,7 @@ public final class MainActivity extends Activity {
         saveFiles = files;
     }
 
-    private void loadMenu() {
+    private void savedFileMenu() {
         File[] files = saveFiles;
         String[] labels = new String[files.length + 2];
         for (int index = 0; index < files.length; index++) labels[index] = files[index].getName();
@@ -316,7 +531,13 @@ public final class MainActivity extends Activity {
                     File imported = GameImporter.importSave(getContentResolver(), uri, saveDirectory, progress);
                     call("load", imported.getAbsolutePath());
                     refreshSaves();
-                    ui.post(() -> { busy = false; message = ""; resumePlayback(); toast("PC 存档已读取"); });
+                    ui.post(() -> {
+                        busy = false;
+                        message = "";
+                        gameView.hideText = false;
+                        resumePlayback();
+                        toast("PC 存档已读取");
+                    });
                 } else if (request == PICK_EXPORT && saveDirectory != null) {
                     NativeBridge.command(session, "sync_globals", "");
                     GameImporter.exportSaves(getContentResolver(), uri, saveDirectory, progress);
@@ -382,6 +603,11 @@ public final class MainActivity extends Activity {
 
     private void navigateBack() {
         if (busy || actionPending) { toast("正在处理资源，请稍候"); return; }
+        if (slotMenu != null) {
+            if (slotMenu.confirming()) cancelSaveConfirmation();
+            else closeSlotMenu();
+            return;
+        }
         if (mode == Mode.PLAYING) pauseMenu();
         else if (mode == Mode.PAUSED && !engineFailed) resumePlayback();
         else if (mode == Mode.PAUSED) command("title", "", () -> mode = Mode.TITLE);
@@ -436,12 +662,26 @@ public final class MainActivity extends Activity {
         private final TextPaint textPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
         private JSONObject state = new JSONObject();
         private final List<Button> buttons = new ArrayList<>();
+        private volatile OriginalAssets originalAssets;
+        private float pressedX = -1;
+        private float pressedY = -1;
+        private float touchStartX;
+        private float touchStartY;
         private boolean hideText;
         private float scale = 1f;
         private float left;
         private float top;
 
-        GameView() { super(MainActivity.this); setFocusable(true); setContentDescription("Yuka 游戏画面，点击推进，右上角打开菜单"); textPaint.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL)); }
+        GameView() {
+            super(MainActivity.this);
+            setFocusable(true);
+            setFocusableInTouchMode(true);
+            setDefaultFocusHighlightEnabled(false);
+            setContentDescription("Yuka 游戏画面，点击推进，底部保存和读取，安卓返回键打开菜单");
+            textPaint.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        }
+        boolean canSave() { synchronized (frameLock) { return state.optBoolean("can_save"); } }
+        int stateInteger(String key, int fallback) { synchronized (frameLock) { return state.optInt(key, fallback); } }
         void update(int[] data, JSONObject nextState) {
             synchronized (frameLock) { bitmap.setPixels(data, 0, WIDTH, 0, 0, WIDTH, HEIGHT); state = nextState; }
             postInvalidate();
@@ -458,7 +698,9 @@ public final class MainActivity extends Activity {
             synchronized (frameLock) {
                 canvas.drawBitmap(bitmap, 0, 0, paint);
                 buttons.clear();
-                if (mode == Mode.PLAYING) drawStory(canvas); else drawMenu(canvas);
+                if (slotMenu != null) slotMenu.draw(canvas, pressedX, pressedY);
+                else if (mode == Mode.PLAYING) drawStory(canvas);
+                else drawMenu(canvas);
                 if (!message.isEmpty()) {
                     StaticLayout layout = layout(message, 17f, 730);
                     rect(canvas, 20, 48, 760, Math.min(180, layout.getHeight() + 20), 0xf5101c2c);
@@ -470,33 +712,55 @@ public final class MainActivity extends Activity {
 
         private void drawStory(Canvas canvas) {
             if (!hideText && state.optBoolean("dialogue_visible", true)) {
+                JSONArray bodyOffset = state.optJSONArray("dialogue_offset");
+                float dx = bodyOffset == null ? 0 : bodyOffset.optInt(0);
+                float dy = bodyOffset == null ? 0 : bodyOffset.optInt(1);
+                JSONArray nameOffset = state.optJSONArray("speaker_offset");
+                float nx = nameOffset == null ? 0 : nameOffset.optInt(0);
+                float ny = nameOffset == null ? 0 : nameOffset.optInt(1);
+                originalImage(canvas, "window", -1, 3 + dx, 473 + dy, 179);
+                originalImage(canvas, "name", -1, nx, 437 + ny, 179);
                 String dialogue = state.optString("dialogue");
                 if (!dialogue.isEmpty()) {
-                    float size = 24f;
-                    StaticLayout body = layout(dialogue, size, 714);
-                    while (body.getHeight() > 330 && size > 14f) body = layout(dialogue, --size, 714);
-                    float height = Math.max(125, body.getHeight() + 22);
-                    float y = 567 - height;
-                    JSONArray bodyOffset = state.optJSONArray("dialogue_offset");
-                    float dx = bodyOffset == null ? 0 : bodyOffset.optInt(0);
-                    float dy = bodyOffset == null ? 0 : bodyOffset.optInt(1);
-                    rect(canvas, 20 + dx, y + dy, 760, height, 0xe6101b2b);
-                    canvas.save(); canvas.translate(42 + dx, y + dy + 10); body.draw(canvas); canvas.restore();
-                    String speaker = state.optString("speaker");
-                    if (!speaker.isEmpty()) {
-                        JSONArray nameOffset = state.optJSONArray("speaker_offset");
-                        float nx = nameOffset == null ? 0 : nameOffset.optInt(0);
-                        float ny = nameOffset == null ? 0 : nameOffset.optInt(1);
-                        rect(canvas, 20 + nx, y - 35 + ny, Math.max(120, textWidth(speaker, 23) + 36), 35, 0xf2233951);
-                        text(canvas, speaker, 38 + nx, y - 8 + ny, 23, 0xfff7e4b8);
-                    }
+                    canvas.save();
+                    canvas.clipRect(98 + dx, 482 + dy, 712 + dx, 600 + dy);
+                    outlinedText(canvas, dialogue, 98 + dx, 482 + dy, 25f, 614,
+                        Layout.Alignment.ALIGN_NORMAL, Color.WHITE, Color.BLACK);
+                    canvas.restore();
                 }
+                String speaker = state.optString("speaker");
+                if (!speaker.isEmpty()) {
+                    outlinedText(canvas, speaker, nx, 442 + ny, 25f, 220,
+                        Layout.Alignment.ALIGN_CENTER, Color.WHITE, Color.BLACK);
+                }
+                boolean canSave = state.optBoolean("can_save") && !engineFailed;
+                originalButton(canvas, "sys_btn01", 0, 5, "SYSTEM", 388, 580, 72, 16,
+                    nativeReady, MainActivity.this::playerTools);
+                originalButton(canvas, "sys_btn01", 1, 6, "Q.SAVE", 462, 580, 72, 16,
+                    canSave, MainActivity.this::quickSave);
+                originalButton(canvas, "sys_btn01", 2, 7, "Q.LOAD", 536, 580, 72, 16,
+                    nativeReady, MainActivity.this::quickLoad);
+                originalButton(canvas, "sys_btn01", 3, 8, "SAVE", 610, 580, 72, 16,
+                    canSave, MainActivity.this::saveMenu);
+                originalButton(canvas, "sys_btn01", 4, 9, "LOAD", 684, 580, 72, 16,
+                    nativeReady, MainActivity.this::loadMenu);
+                originalButton(canvas, "sys_btn02", 0, 8, "×", 761, 497, 38, 21, true,
+                    () -> { hideText = true; invalidate(); });
+                originalButton(canvas, "sys_btn02", 1, 9, "▶", 761, 520, 38, 21, true,
+                    () -> toast("自动阅读功能尚未实现"));
+                originalButton(canvas, "sys_btn02", 2, 10, "▶▶", 761, 543, 38, 21, true,
+                    () -> toast("已读快进功能尚未实现"));
+                originalButton(canvas, "sys_btn02", 3, 11, "◀◀", 761, 566, 38, 21, true,
+                    () -> toast("原版对话履历功能尚未实现"));
+                drawButtonHelp(canvas);
             }
-            add(canvas, "文字", 8, 4, 82, 36, true, () -> { hideText = !hideText; invalidate(); });
-            add(canvas, "菜单", 700, 4, 92, 36, true, MainActivity.this::pauseMenu);
             JSONArray choices = state.optJSONArray("choices");
             if (choices != null && choices.length() > 0) {
                 int count = choices.length();
+                if (count <= 5 && originalAssets != null) {
+                    drawOriginalChoices(canvas, choices);
+                    return;
+                }
                 float row = Math.min(52f, 400f / count);
                 float start = Math.max(70, (HEIGHT - count * row) / 2f);
                 rect(canvas, 115, start - 15, 570, count * row + 25, 0xee101c2c);
@@ -506,36 +770,112 @@ public final class MainActivity extends Activity {
                         () -> command("choose", Integer.toString(selected), null));
                 }
             }
-            rect(canvas, 0, 575, WIDTH, 25, 0xf508111b);
-            text(canvas, state.optString("status"), 15, 593, 14, 0xffc9d7e4);
         }
 
         private void drawMenu(Canvas canvas) {
-            rect(canvas, 0, 0, WIDTH, HEIGHT, 0x8806101e);
             boolean canSave = state.optBoolean("can_save") && !busy && !engineFailed;
             if (mode == Mode.TITLE) {
                 if (bundledMode && !nativeReady)
-                    add(canvas, "重试准备游戏", 210, 230, 380, 42, true, MainActivity.this::retryBundledGame);
-                else add(canvas, "开始游戏", 210, 230, 380, 42, nativeReady, MainActivity.this::begin);
-                File[] available = saveFiles;
-                add(canvas, "继续上次存档", 210, 278, 380, 42, nativeReady && available.length > 0, () -> load(available[0]));
-                add(canvas, "读取存档", 210, 326, 380, 42, nativeReady, MainActivity.this::loadMenu);
-                if (!bundledMode) {
-                    add(canvas, "导入游戏文件夹", 210, 374, 380, 42, true, MainActivity.this::pickGame);
-                    add(canvas, "切换已导入游戏", 210, 422, 380, 42, true, MainActivity.this::installedGames);
+                    add(canvas, "重试准备游戏", 210, 272, 380, 42, true, MainActivity.this::retryBundledGame);
+                else originalButton(canvas, "t_btn", 0, 5, "开始游戏", 315, 272, 155, 54,
+                    nativeReady, MainActivity.this::begin);
+                originalButton(canvas, "t_btn", 1, 6, "继续游戏", 315, 327, 155, 54,
+                    nativeReady, MainActivity.this::loadMenu);
+                originalButton(canvas, "t_btn", 2, 7, "选项设置", 315, 382, 155, 54,
+                    true, MainActivity.this::playerTools);
+                originalButton(canvas, "t_btn", 3, 8, "附加内容", 315, 437, 155, 54,
+                    nativeReady, () -> toast("原版附加内容与鉴赏模式尚未实现"));
+                originalButton(canvas, "t_btn", 4, 9, "游戏结束", 315, 492, 155, 54,
+                    true, MainActivity.this::finish);
+                for (int index = 0; index < 5; index++) {
+                    float y = 272 + index * 55;
+                    if (pressedX >= 315 && pressedX < 470 && pressedY >= y && pressedY < y + 54)
+                        originalImage(canvas, "t_btn_msg", index, 470, y, 255);
                 }
-                add(canvas, "退出", 210, bundledMode ? 374 : 470, 380, 42, true, MainActivity.this::finish);
             } else {
+                rect(canvas, 0, 0, WIDTH, HEIGHT, 0x8806101e);
                 boolean hasQuickSave = false;
-                for (File file : saveFiles) if (file.getName().equals("savedata.099")) hasQuickSave = true;
+                for (File file : saveFiles)
+                    if (file.getName().equals("savedata.999") || file.getName().equals("savedata.099")) hasQuickSave = true;
                 add(canvas, "继续游戏", 210, 150, 380, 42, nativeReady && !engineFailed, MainActivity.this::resumePlayback);
-                add(canvas, "快速存档", 210, 198, 380, 42, canSave, () -> save(new File(saveDirectory, "savedata.099")));
-                add(canvas, "读取快速存档", 210, 246, 380, 42, hasQuickSave, () -> load(new File(saveDirectory, "savedata.099")));
+                add(canvas, "快速存档", 210, 198, 380, 42, canSave, MainActivity.this::quickSave);
+                add(canvas, "读取快速存档", 210, 246, 380, 42, hasQuickSave, MainActivity.this::quickLoad);
                 add(canvas, "保存到存档槽", 210, 294, 380, 42, canSave, MainActivity.this::saveMenu);
                 add(canvas, "读取存档", 210, 342, 380, 42, nativeReady, MainActivity.this::loadMenu);
                 add(canvas, "返回标题", 210, 390, 380, 42, nativeReady,
                     () -> command("title", "", () -> mode = Mode.TITLE));
                 add(canvas, "导出完整存档目录", 210, 438, 380, 42, nativeReady, MainActivity.this::exportSaves);
+            }
+        }
+
+        private void originalImage(Canvas canvas, String name, int sequence, float x, float y, int alpha) {
+            OriginalAssets assets = originalAssets;
+            if (assets == null) return;
+            Bitmap image = assets.bitmap(name, sequence);
+            int previousAlpha = paint.getAlpha();
+            paint.setAlpha(alpha);
+            canvas.drawBitmap(image, x, y, paint);
+            paint.setAlpha(previousAlpha);
+        }
+
+        private void originalButton(Canvas canvas, String name, int normal, int hover, String fallback,
+                float x, float y, float width, float height, boolean enabled, Runnable action) {
+            if (originalAssets == null) {
+                add(canvas, fallback, x, y, width, height, enabled, action);
+                return;
+            }
+            boolean active = enabled && !busy && !actionPending;
+            RectF bounds = new RectF(x, y, x + width, y + height);
+            boolean pressed = active && bounds.contains(pressedX, pressedY);
+            originalImage(canvas, name, pressed ? hover : normal, x, y, active ? 255 : 128);
+            buttons.add(new Button(bounds, active, action));
+        }
+
+        private void outlinedText(Canvas canvas, String value, float x, float y, float size,
+                int width, Layout.Alignment alignment, int color, int borderColor) {
+            TextPaint nativeText = new TextPaint(sized(size, color));
+            nativeText.setStrokeJoin(Paint.Join.ROUND);
+            nativeText.setStrokeWidth(2f);
+            StaticLayout text = StaticLayout.Builder.obtain(value, 0, value.length(), nativeText, width)
+                .setAlignment(alignment).setLineSpacing(32f - nativeText.getFontSpacing(), 1f)
+                .setIncludePad(false).build();
+            canvas.save();
+            canvas.translate(x, y);
+            nativeText.setStyle(Paint.Style.STROKE);
+            nativeText.setColor(borderColor);
+            text.draw(canvas);
+            nativeText.setStyle(Paint.Style.FILL);
+            nativeText.setColor(color);
+            text.draw(canvas);
+            canvas.restore();
+        }
+
+        private void drawOriginalChoices(Canvas canvas, JSONArray choices) {
+            int[][] positions = {{193}, {151, 235}, {109, 193, 277}, {71, 151, 235, 315}, {63, 128, 193, 258, 323}};
+            int[] rows = positions[choices.length() - 1];
+            for (int index = 0; index < rows.length; index++) {
+                final int selected = index;
+                int y = rows[index];
+                RectF bounds = new RectF(78, y - 6, 716, y + 51);
+                boolean active = !busy && !actionPending;
+                boolean pressed = active && bounds.contains(pressedX, pressedY);
+                originalImage(canvas, "select", -1, 49, y, 255);
+                outlinedText(canvas, choices.optString(index), 108, y + 5, 36f, 608,
+                    Layout.Alignment.ALIGN_NORMAL, pressed ? Color.WHITE : 0xfffad457, 0xff291e13);
+                buttons.add(new Button(bounds, active, () -> command("choose", Integer.toString(selected), null)));
+            }
+        }
+
+        private void drawButtonHelp(Canvas canvas) {
+            for (int index = 0; index < 5; index++) {
+                float x = 388 + index * 74;
+                if (pressedX >= x && pressedX < x + 72 && pressedY >= 580 && pressedY < 596)
+                    originalImage(canvas, "sys_btn_help", index + 3, 560, 458, 255);
+            }
+            for (int index = 0; index < 4; index++) {
+                float y = 497 + index * 23;
+                if (pressedX >= 761 && pressedX < 799 && pressedY >= y && pressedY < y + 21)
+                    originalImage(canvas, "sys_btn_help", index == 0 ? 8 : index - 1, 560, 458, 255);
             }
         }
 
@@ -550,7 +890,6 @@ public final class MainActivity extends Activity {
         }
 
         private TextPaint sized(float size, int color) { textPaint.setTextSize(size); textPaint.setColor(color); return textPaint; }
-        private float textWidth(String value, float size) { return sized(size, Color.WHITE).measureText(value); }
         private StaticLayout layout(String value, float size, int width) {
             return StaticLayout.Builder.obtain(value, 0, value.length(), new TextPaint(sized(size, Color.WHITE)), width)
                 .setAlignment(Layout.Alignment.ALIGN_NORMAL).setLineSpacing(5f, 1f).setIncludePad(false).build();
@@ -559,12 +898,20 @@ public final class MainActivity extends Activity {
         private void rect(Canvas canvas, float x, float y, float width, float height, int color) { paint.setColor(color); canvas.drawRect(x, y, x + width, y + height, paint); paint.setColor(Color.WHITE); }
 
         @Override public boolean onTouchEvent(MotionEvent event) {
-            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) return true;
-            if (event.getActionMasked() != MotionEvent.ACTION_UP) return true;
-            performClick();
             float x = (event.getX() - left) / scale;
             float y = (event.getY() - top) / scale;
+            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                touchStartX = x; touchStartY = y; pressedX = x; pressedY = y;
+                invalidate(); return true;
+            }
+            if (event.getActionMasked() == MotionEvent.ACTION_MOVE) { pressedX = x; pressedY = y; invalidate(); return true; }
+            if (event.getActionMasked() == MotionEvent.ACTION_CANCEL) { pressedX = -1; pressedY = -1; invalidate(); return true; }
+            if (event.getActionMasked() != MotionEvent.ACTION_UP) return true;
+            pressedX = -1; pressedY = -1; invalidate();
+            performClick();
             if (x < 0 || y < 0 || x >= WIDTH || y >= HEIGHT || busy || actionPending) return true;
+            if (Math.abs(x - touchStartX) > 20 || Math.abs(y - touchStartY) > 20) return true;
+            if (slotMenu != null) { slotMenu.tap(x, y); return true; }
             for (Button button : buttons) {
                 if (button.bounds.contains(x, y)) { if (button.enabled) button.action.run(); return true; }
             }
@@ -576,6 +923,10 @@ public final class MainActivity extends Activity {
                 }
             }
             return true;
+        }
+        @Override protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
+            super.onSizeChanged(width, height, oldWidth, oldHeight);
+            if (remarkField != null) post(MainActivity.this::positionRemark);
         }
         @Override public boolean performClick() { return super.performClick(); }
     }

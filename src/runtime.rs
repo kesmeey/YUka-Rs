@@ -22,7 +22,9 @@ mod native_globals;
 mod native_persistence;
 mod native_thumbnail;
 mod persistence;
+mod ui;
 use graphics_host::GraphicsEffects;
+pub use ui::SaveInfo;
 
 struct Activation {
     name: String,
@@ -352,7 +354,8 @@ impl Runtime {
                     && let Some(directory) = &self.save_directory
                 {
                     #[cfg(target_os = "android")]
-                    let result = self.save_native(&directory.join("savedata.001"));
+                    let result = self
+                        .save_native_with_comment(&directory.join("savedata.001"), "[AUTO SAVE]");
                     #[cfg(not(target_os = "android"))]
                     let result = self.save(&directory.join("auto.json"));
                     self.autosave_requested = false;

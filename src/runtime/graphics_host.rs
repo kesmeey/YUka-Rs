@@ -37,7 +37,7 @@ fn rect(frame: &AnimationFrame) -> [u32; 4] {
     [frame.x, frame.y, frame.width, frame.height]
 }
 
-fn sprite_frames(
+pub(super) fn sprite_sequence(
     frames: Vec<AnimationFrame>,
     sequence: usize,
     image: &RgbaImage,
@@ -60,9 +60,6 @@ fn sprite_frames(
         return Err("sprite animation has no display frames".into());
     }
     for frame in frames {
-        if frame.flags != 2 || frame.unknown != 0 || frame.action != 0 || frame.duration == 0 {
-            return Err("unsupported sprite frame flags, action, or duration".into());
-        }
         if frame.width == 0
             || frame.height == 0
             || frame
@@ -78,6 +75,20 @@ fn sprite_frames(
         }
     }
     Ok(frames.to_vec())
+}
+
+fn sprite_frames(
+    frames: Vec<AnimationFrame>,
+    sequence: usize,
+    image: &RgbaImage,
+) -> Result<Vec<AnimationFrame>> {
+    let frames = sprite_sequence(frames, sequence, image)?;
+    if frames.iter().any(|frame| {
+        frame.flags != 2 || frame.unknown != 0 || frame.action != 0 || frame.duration == 0
+    }) {
+        return Err("unsupported sprite frame flags, action, or duration".into());
+    }
+    Ok(frames)
 }
 
 impl GraphicsEffects {
