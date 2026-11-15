@@ -1,9 +1,12 @@
 [package]
 name = "yuka-rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "Yuka engine reconstruction and binary format research tools"
+
+[lib]
+crate-type = ["rlib"]
 
 [dependencies]
 clap = { version = "=4.6.1", features = ["derive"] }
@@ -11,7 +14,12 @@ encoding_rs = "=0.8.35"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
 image = { version = "=0.25.10", default-features = false, features = ["png", "bmp"] }
-minifb = "=0.28.0"
 fontdue = "=0.9.3"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+minifb = "=0.28.0"
 rodio = { version = "=0.20.1", default-features = false, features = ["vorbis"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "=0.21.1"
 

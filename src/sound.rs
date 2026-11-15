@@ -22,6 +22,8 @@ pub struct SoundState {
     pub volume: i32,
     pub looping: bool,
     pub playing: bool,
+    #[serde(default)]
+    pub streamed: bool,
 }
 
 pub struct Sound {
@@ -76,6 +78,7 @@ impl Sound {
                 volume: 1000,
                 looping: false,
                 playing: false,
+                streamed: false,
             },
         );
         Ok(())
@@ -108,6 +111,12 @@ impl Sound {
             }
         }
         Ok(())
+    }
+
+    pub fn set_streamed(&mut self, slot: i32, streamed: bool) {
+        if let Some(state) = self.states.get_mut(&slot) {
+            state.streamed = streamed;
+        }
     }
 
     pub fn volume(&mut self, slot: i32, volume: i32) {

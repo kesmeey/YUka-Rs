@@ -18,6 +18,9 @@ pub const DEFAULT_SCRIPT: &str = "yks\\story\\common\\PROLOGUE1.YKS";
 pub const PLAY_SCRIPT: &str = "yks\\root\\root_Common.yks";
 
 mod graphics_host;
+mod native_globals;
+mod native_persistence;
+mod native_thumbnail;
 mod persistence;
 use graphics_host::GraphicsEffects;
 
@@ -84,12 +87,18 @@ pub struct Runtime {
     paused_at: Option<Instant>,
     layer_sources: BTreeMap<i32, String>,
     chapter: String,
+    window_title: String,
+    page_voice_paths: String,
+    native_selection: native_persistence::NativeSelection,
+    native_selection_visibility: BTreeMap<i32, bool>,
     save_directory: Option<PathBuf>,
     autosave_requested: bool,
     random_state: u64,
     effects: GraphicsEffects,
     timers: BTreeMap<i32, Instant>,
     end_reason: Option<String>,
+    native_globals: native_globals::NativeGlobals,
+    native_template: Option<crate::native_save::NativeSave>,
 }
 
 fn int(arguments: &[Value], index: usize) -> Result<i32> {
@@ -116,7 +125,38 @@ fn text_value(text: &str) -> Value {
 }
 
 impl Runtime {
+    #[cfg(target_os = "android")]
+    pub(crate) fn drain_audio_events(&mut self) -> Vec<crate::sound::AudioEvent> {
+        self.sound.drain_events()
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn audio_completed(&mut self, slot: i32, generation: u64, error: Option<String>) {
+        self.sound.completed(slot, generation);
+        if let Some(error) = error {
+            self.sound.warning = Some(error);
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn stop_audio(&mut self) {
+        self.sound.stop_all();
+    }
+
     pub fn new(
+        directory: &Path,
+        entry: &str,
+        encoding: TextEncoding,
+        fast: bool,
+        muted: bool,
+        pages: usize,
+    ) -> Result<Self> {
+        let mut runtime = Self::new_unstarted(directory, entry, encoding, fast, muted, pages)?;
+        runtime.drive()?;
+        Ok(runtime)
+    }
+
+    pub(crate) fn new_unstarted(
         directory: &Path,
         entry: &str,
         encoding: TextEncoding,
@@ -144,7 +184,7 @@ impl Runtime {
                 text_value(name),
             )?;
         }
-        let mut runtime = Self {
+        let runtime = Self {
             scene: Scene::default(),
             resources,
             sound: Sound::new(muted),
@@ -169,6 +209,10 @@ impl Runtime {
             paused_at: None,
             layer_sources: BTreeMap::new(),
             chapter: String::new(),
+            window_title: "Yuka RS".into(),
+            page_voice_paths: String::new(),
+            native_selection: native_persistence::NativeSelection::default(),
+            native_selection_visibility: BTreeMap::new(),
             save_directory: None,
             autosave_requested: false,
             random_state: std::time::SystemTime::now()
@@ -179,8 +223,9 @@ impl Runtime {
             effects: GraphicsEffects::default(),
             timers: BTreeMap::new(),
             end_reason: None,
+            native_globals: native_globals::NativeGlobals::default(),
+            native_template: None,
         };
-        runtime.drive()?;
         Ok(runtime)
     }
 
@@ -306,6 +351,9 @@ impl Runtime {
                     && self.can_save()
                     && let Some(directory) = &self.save_directory
                 {
+                    #[cfg(target_os = "android")]
+                    let result = self.save_native(&directory.join("savedata.001"));
+                    #[cfg(not(target_os = "android"))]
                     let result = self.save(&directory.join("auto.json"));
                     self.autosave_requested = false;
                     if let Err(error) = result {
@@ -318,6 +366,11 @@ impl Runtime {
             if let Some(name) = self.resources.script_name(current.vm.current_script()) {
                 current.name = name.to_owned();
             }
+            self.native_globals.mark(
+                &current.name,
+                current.vm.current_script().code.len(),
+                current.vm.pc,
+            );
             let event = current
                 .vm
                 .step()
@@ -356,6 +409,7 @@ impl Runtime {
                                 .starts_with("ykg/system/select/")
                                 && let Some(layer) = self.scene.layers.get_mut(&slot)
                             {
+                                self.native_selection_visibility.insert(slot, layer.visible);
                                 layer.visible = false;
                             }
                         }
@@ -447,9 +501,13 @@ impl Runtime {
         match function {
             "Index" => self.chapter = string(args, 0)?.to_owned(),
             "WindowNameSet" => {
-                let _ = string(args, 0)?;
+                self.window_title = string(args, 0)?.to_owned();
             }
             "SaveDataSave" => self.autosave_requested = true,
+            "SystemDataWrite" | "AlreadyDataWrite" => {
+                self.flush_native_globals()?;
+                return Ok(Some(Value::Integer(1)));
+            }
             "RGB" => {
                 let color = if args.len() == 1 {
                     let rgb = int(args, 0)? as u32;
@@ -497,7 +555,12 @@ impl Runtime {
                     self.waiting = Waiting::Timer(deadline);
                 }
             }
-            "SelectMode" | "SelectPosition" | "TextBorderColor" => {
+            "SelectMode" | "SelectPosition" => {
+                self.native_selection.handle(function, args)?;
+                self.approximations
+                    .insert("Choice layout and text borders use the runtime menu".into());
+            }
+            "TextBorderColor" => {
                 self.approximations
                     .insert("Choice layout and text borders use the runtime menu".into());
             }
@@ -646,6 +709,7 @@ impl Runtime {
                 self.waiting = Waiting::Key;
             }
             "PF" => {
+                self.page_voice_paths.clear();
                 if args.is_empty() {
                     self.scene.dialogue.clear();
                     self.scene.speaker.clear();
@@ -661,6 +725,8 @@ impl Runtime {
             "SoundLoad" | "SoundLoadStream" => {
                 let bytes = self.resources.read(string(args, 1)?)?;
                 self.sound.load(int(args, 0)?, string(args, 1)?, bytes)?;
+                self.sound
+                    .set_streamed(int(args, 0)?, function == "SoundLoadStream");
             }
             "SoundPlay" | "SoundPlayLoop" => {
                 let slot = int(args, 0)?;
@@ -672,6 +738,19 @@ impl Runtime {
                     )?;
                 }
                 self.sound.play(slot, function == "SoundPlayLoop")?;
+                // The supplied voiceSetting/createHistory scripts map voice groups to slots 10..21.
+                if (10..=21).contains(&slot)
+                    && let Some((_, state)) = self
+                        .sound
+                        .snapshot()
+                        .into_iter()
+                        .find(|(id, _)| *id == slot)
+                {
+                    if !self.page_voice_paths.is_empty() {
+                        self.page_voice_paths.push('\t');
+                    }
+                    self.page_voice_paths.push_str(&state.path);
+                }
             }
             "SoundStop" => self.sound.stop(int(args, 0)?),
             "SoundDelete" => self.sound.delete(int(args, 0)?),

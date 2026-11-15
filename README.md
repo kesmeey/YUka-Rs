@@ -1,7 +1,7 @@
 # yuka-rs
 
 用 Rust 重实现 Yuka System 的项目，面向后续复用原游戏资源的跨平台运行时。
-当前提供 Windows 运行时，直接执行原始 YKS 脚本，读取 YKC 内的背景、立绘与 Ogg 音频，支持标题、选择支和存读档。
+当前提供 Windows 运行时和 Android 宿主，直接执行原始 YKS 脚本，读取 YKC 内的背景、立绘与 Ogg 音频，支持标题、选择支和存读档。
 
 项目位置为 `E:\llvm-agent\yuka-rs`。本轮以用户提供的《情侣热恋中》汉化版作为真实样本。
 格式和 VM 位于 library crate，桌面宿主使用 minifb、fontdue、image 和 rodio。
@@ -29,6 +29,38 @@
 
 六项本地集成测试覆盖 40→60 页回档重放、540→550 页跨序章返回、真实选择的两个分支重选、
 外部调用栈、连续覆盖和损坏存档拒绝。比较内容包括图层像素、位置、滤镜、文字和脚本位置。
+
+## Android 与原版存档
+
+Android 宿主使用 Java 触摸界面、MediaPlayer 音频输出和 Rust JNI，最低版本为 Android 8.0。
+构建包含 `arm64-v8a` 和 `x86_64` 两种 ABI，产物路径为 `bin/Yuka-Rs-0.2.0.apk`。
+构建脚本为 `android/build.ps1`，需要传入 SDK Platform、Build Tools、NDK 和 Java 工具链目录。
+
+安装后选择“导入游戏文件夹”，选中包含 `data*.ykc` 的游戏目录。导入器把资源和已有 `Save` 目录复制到应用私有存储，
+标题提供开始、继续和读取存档。触摸推进对白，选择支直接点选，返回键打开暂停菜单。
+暂停菜单可存读档，并可通过“导出完整存档目录”导出供 PC 使用的存档文件。
+
+Android 使用原版 `savedata.NNN`、`System.dat` 和 `Already.dat` 二进制格式。
+自动存档使用原脚本的 `savedata.001`，快速存档使用 `savedata.099`。
+原格式桥接保存脚本 PC、跨文件和本地调用帧、Flag/String、图层、正文、姓名、计时器和声音状态。
+GlobalFlag/GlobalString 与已读记录独立保存，读取较早的剧情槽时保留当前全局进度。
+导出整个 `Save` 目录后，可把这些文件复制到相同汉化版本的 PC 游戏存档目录。
+
+当前原格式兼容性以本机《情侣热恋中》汉化版样本为范围。已完成原档读取、40 页推进后的再次保存/读取、
+新游戏无模板导出、真实选择支保存/恢复，以及全局整数、中文字符串、已读标记和失败加载回归。
+隔离运行的原版 PC 程序已加载真实选择档 `savedata.006`，点击首项后回到调用章节并继续通过 11 个对白等待点。
+Android 15 x86_64 模拟器已完成 Android 生成 `savedata.005`、原版 PC 加载并推进、PC 回存 `savedata.021`、
+Android 再读取和继续剧情的完整往返。原档读回再保存的正文、姓名、选择和图层帧一致性检查通过。
+同一 APK 已恢复真实选择档 `savedata.006` 的两个分支，并通过音频焦点恢复测试和实际点击检查。
+原 PC 完成选择后写出的 `savedata.022` 也已在 Android 读取、再保存和继续剧情。
+ARM64 实机、扬声器输出及不同厂商设备的生命周期行为尚待验证。
+原版字形、文字布局与转场效果仍沿用下述运行时边界。活跃子 Sprite、未支持的变换和粒子状态会报告具体错误。
+原生结构与测试依据见 `docs/native-save.md`、`docs/native-save-runtime.md` 和 `android/TESTING.md`。
+
+```powershell
+$env:YUKA_TEST_GAME = 'path-to-the-supplied-game'
+cargo test --lib runtime::native_persistence::tests -- --ignored
+```
 
 ## 连续剧情回归
 
@@ -93,9 +125,8 @@ $game = 'D:\gal\love loabe\【PC】情侣热恋中\情侣热恋中（ラブラ�
 `Effect` 屏幕震动暂未实现。文字框移动、背景滚动和音频异步淡出已有实现。
 音频统一使用 65% 主音量，再乘脚本设置的局部音量。设备不可用时显示静音状态。
 
-`MoviePlay` 当前跳过 OP 视频并记录到报告。原版设置/鉴赏菜单、独立全局解锁存储、
-其他作品验证和 Android APK 仍待实现。存档中的变量状态会随该存档恢复。
-Android 接入还需拆分桌面依赖并提供窗口、触摸、音频和资源访问宿主。
+`MoviePlay` 当前跳过 OP 视频并记录到报告。原版设置/鉴赏菜单和其他作品验证仍待实现。
+Windows JSON 存档中的变量状态随该存档恢复，Android 原格式存档将全局变量和已读记录单独持久化。
 执行报告中的 `approximations` 记录本次路径使用到的效果近似。
 
 ## 已实现与验证范围
@@ -110,7 +141,8 @@ Android 接入还需拆分桌面依赖并提供窗口、触摸、音频和资源
 | 原生逆向 | Windows API 依赖、命令注册表、关键分发器与处理函数地址 | 339 个注册项，脚本引用的 142 个函数名全部匹配 |
 
 100 页演示执行 1,264 步，加载 5 个脚本，解码 26 次图像资源和 56 次音频资源。
-发布版构建、38 项默认测试、6 项本地存档集成测试、`cargo fmt --check` 和 Clippy 零警告检查通过。
+发布版构建、47 项默认测试（43 项 library 测试和 4 项原格式 codec 测试）、6 项 Windows JSON 存档回归、
+4 项原格式 runtime 回归、1 项原档 codec 实数据回归、`cargo fmt --check` 和 Clippy 零警告检查通过。
 另有一项依赖本地全部游戏图像的测试，默认忽略，初始格式验证阶段已单独运行通过。
 音频计数表示建立解码器并确认首批样本，实际播放由音频线程继续解码。
 前 100 页最长单页正文为 47 字符。真实样本截图覆盖海景、立绘 alpha 与中文姓名。
@@ -172,6 +204,8 @@ $exe = '.\target\release\yuka-rs.exe'
 - `docs/demo-semantics.md` 记录序章入口、默认状态、相关原生命令依据和近似行为。
 - `docs/playback-semantics.md` 记录连续故事、选择、滤镜、图集动画和演职员表的原生依据。
 - `docs/native-analysis.md` 记录原程序身份、函数地址、静态语义和复现方法。
+- `docs/native-save.md` 与 `docs/native-save-runtime.md` 记录原版存档格式、运行时还原和互通测试范围。
+- `src/android.rs` 与 `android/` 提供 Android JNI、界面、音频、资源导入和 APK 构建。
 - `evidence/` 保存本机的完整 REA 输出、原生命令表、验证结果和启动脚本跟踪。
 
 本机验证结果包括 `evidence/archive-inventory.json`、`evidence/game-verification.json`、
@@ -186,7 +220,7 @@ REA 已完成 PE import 检查。该安装尚未配置深度反编译 provider�
 1. 扩展完整故事路径与原版设置菜单的命令覆盖。
 2. 比对原版转场、逐字显示、字体和音频组设置。
 3. 扩展存档兼容性检查，增加其他 Yuka 版本的真实回归样本。
-4. 拆分桌面依赖，通过安卓宿主接入窗口、图形、音频、触摸和资源目录访问。
+4. 扩展 Android 实机、音频与生命周期回归。
 
 ## 许可证
 

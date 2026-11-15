@@ -1,15 +1,26 @@
 //! Desktop framebuffer host and software rendering for the Yuka demo.
 //! The same Renderer can produce deterministic screenshots without a window.
 
+#[cfg(not(target_os = "android"))]
 use crate::Result;
+#[cfg(not(target_os = "android"))]
 use fontdue::{Font, FontSettings, Metrics};
-use image::{ImageEncoder, RgbaImage};
+#[cfg(not(target_os = "android"))]
+use image::ImageEncoder;
+use image::RgbaImage;
+#[cfg(not(target_os = "android"))]
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, ScaleMode, Window, WindowOptions};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+#[cfg(not(target_os = "android"))]
+use std::collections::HashMap;
+#[cfg(not(target_os = "android"))]
 use std::fs::OpenOptions;
+#[cfg(not(target_os = "android"))]
 use std::io::{BufWriter, Write};
+#[cfg(not(target_os = "android"))]
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(not(target_os = "android"))]
 use std::time::{Duration, Instant};
 
 pub const WIDTH: usize = 800;
@@ -63,11 +74,13 @@ impl Default for Scene {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 struct Glyph {
     metrics: Metrics,
     pixels: Vec<u8>,
 }
 
+#[cfg(not(target_os = "android"))]
 pub struct Renderer {
     font: Font,
     glyphs: HashMap<(char, u16), Glyph>,
@@ -75,6 +88,7 @@ pub struct Renderer {
     previous: Vec<u32>,
 }
 
+#[cfg(not(target_os = "android"))]
 impl Renderer {
     pub fn new(font_bytes: Vec<u8>) -> Result<Self> {
         let font = Font::from_bytes(font_bytes, FontSettings::default())
@@ -98,19 +112,7 @@ impl Renderer {
     }
 
     fn render_selected(&mut self, scene: &Scene, hide_dialogue: bool, selected: usize) -> &[u32] {
-        self.pixels.fill(0);
-        composite_layers(&mut self.pixels, &scene.layers);
-        if let Some(layers) = &scene.transition_from {
-            let progress = scene.transition_progress.clamp(0.0, 1.0);
-            if progress < 1.0 {
-                self.previous.fill(0);
-                composite_layers(&mut self.previous, layers);
-                let alpha = (progress * 255.0).round() as u8;
-                for (current, previous) in self.pixels.iter_mut().zip(&self.previous) {
-                    *current = blend(*previous, *current, alpha);
-                }
-            }
-        }
+        render_layers(scene, &mut self.pixels, &mut self.previous);
         if scene.dialogue_visible && !hide_dialogue && !scene.dialogue.is_empty() {
             self.dialogue(scene);
         }
@@ -357,6 +359,25 @@ impl Renderer {
     }
 }
 
+/// Render the shared 800×600 scene. Android draws text using its system fonts.
+pub fn render_layers(scene: &Scene, pixels: &mut [u32], previous: &mut [u32]) {
+    assert_eq!(pixels.len(), WIDTH * HEIGHT);
+    assert_eq!(previous.len(), WIDTH * HEIGHT);
+    pixels.fill(0);
+    composite_layers(pixels, &scene.layers);
+    if let Some(layers) = &scene.transition_from {
+        let progress = scene.transition_progress.clamp(0.0, 1.0);
+        if progress < 1.0 {
+            previous.fill(0);
+            composite_layers(previous, layers);
+            let alpha = (progress * 255.0).round() as u8;
+            for (current, previous) in pixels.iter_mut().zip(previous) {
+                *current = blend(*previous, *current, alpha);
+            }
+        }
+    }
+}
+
 fn blend(background: u32, foreground: u32, alpha: u8) -> u32 {
     let alpha = u32::from(alpha);
     let inverse = 255 - alpha;
@@ -451,6 +472,7 @@ fn composite_layer(
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg(not(target_os = "android"))]
 enum Screen {
     Title,
     Playing,
@@ -460,6 +482,7 @@ enum Screen {
 }
 
 #[derive(Clone, Copy)]
+#[cfg(not(target_os = "android"))]
 enum MenuAction {
     NewGame,
     Continue,
@@ -476,12 +499,14 @@ enum MenuAction {
     Quit,
 }
 
+#[cfg(not(target_os = "android"))]
 struct MenuItem {
     label: String,
     enabled: bool,
     action: MenuAction,
 }
 
+#[cfg(not(target_os = "android"))]
 impl MenuItem {
     fn new(label: &str, enabled: bool, action: MenuAction) -> Self {
         Self {
@@ -492,6 +517,7 @@ impl MenuItem {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 struct PlayUi {
     screen: Screen,
     parent: Screen,
@@ -502,6 +528,7 @@ struct PlayUi {
     failure: Option<String>,
 }
 
+#[cfg(not(target_os = "android"))]
 impl PlayUi {
     fn enter(&mut self, screen: Screen) {
         self.screen = screen;
@@ -648,10 +675,12 @@ impl PlayUi {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn menu_top(count: usize) -> i32 {
     ((HEIGHT as i32 - count as i32 * 48) / 2 + 80).max(65)
 }
 
+#[cfg(not(target_os = "android"))]
 fn latest_save(directory: &Path) -> Option<PathBuf> {
     [
         "quick.json",
@@ -672,6 +701,7 @@ fn latest_save(directory: &Path) -> Option<PathBuf> {
     .map(|(_, path)| path)
 }
 
+#[cfg(not(target_os = "android"))]
 fn menu_hit(position: Option<(f32, f32)>, count: usize) -> Option<usize> {
     let (x, y) = position?;
     if !(139.0..661.0).contains(&x) {
@@ -685,6 +715,7 @@ fn menu_hit(position: Option<(f32, f32)>, count: usize) -> Option<usize> {
     (index < count && relative_y % 48.0 < 43.0).then_some(index)
 }
 
+#[cfg(not(target_os = "android"))]
 fn framebuffer_position(position: Option<(f32, f32)>, size: (usize, usize)) -> Option<(f32, f32)> {
     let (x, y) = position?;
     let scale = (size.0 as f32 / WIDTH as f32).min(size.1 as f32 / HEIGHT as f32);
@@ -699,6 +730,7 @@ fn framebuffer_position(position: Option<(f32, f32)>, size: (usize, usize)) -> O
 }
 
 /// Interactive player with title, pause, choices and independent Rust-format save slots.
+#[cfg(not(target_os = "android"))]
 pub fn play(
     runtime: &mut crate::runtime::Runtime,
     font_path: &Path,
@@ -926,6 +958,7 @@ pub fn play(
 }
 
 /// The runtime should be initialized to its first yield before entering the window loop.
+#[cfg(not(target_os = "android"))]
 pub fn run(runtime: &mut crate::runtime::Runtime, font_path: &Path) -> Result<()> {
     let mut renderer = Renderer::new(std::fs::read(font_path)?)?;
     let mut window = Window::new(

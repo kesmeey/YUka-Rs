@@ -1,7 +1,8 @@
 //! YKS001 expressions, conditionals, and script frames with explicit host boundaries.
 //! Unimplemented expressions and control flow return errors without being skipped.
 use crate::Result;
-use crate::script::{Element, InstructionKind, Script, Text};
+use crate::native_save::{NativeFrame, NativeValue, read_u32, write_u32};
+use crate::script::{Element, InstructionKind, Script, Text, TextEncoding};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -993,8 +994,8 @@ impl Vm {
         Ok(())
     }
 
-    /// The scheduler calls this only after a string-named ScriptCall child has
-    /// returned and its shared banks have been copied back into this VM.
+    /// Resume a scheduler-owned child after its shared banks have been copied back.
+    /// Imported native saves represent local label calls as separate activations too.
     pub fn resume_script_call(&mut self, value: Option<Value>) -> Result<()> {
         let (
             Event::HostCall {
@@ -1010,8 +1011,13 @@ impl Vm {
         else {
             return Err("pending event is not a host call".into());
         };
-        if function != "ScriptCall" || !matches!(arguments.as_slice(), [Value::String(_)]) {
-            return Err("pending call is not a single-path external ScriptCall".into());
+        if function != "ScriptCall"
+            || !matches!(
+                arguments.as_slice(),
+                [Value::String(_) | Value::Label { .. }]
+            )
+        {
+            return Err("pending call is not a single-destination ScriptCall".into());
         }
         self.complete_pending(value)
     }
@@ -1063,6 +1069,270 @@ impl Vm {
         self.target = None;
         self.awaiting_return = false;
         Ok(())
+    }
+}
+
+fn native_text(bytes: &[u8], encoding: TextEncoding) -> Result<Text> {
+    let (text, had_errors) = match encoding {
+        TextEncoding::Gbk => encoding_rs::GBK.decode_without_bom_handling(bytes),
+        TextEncoding::ShiftJis => encoding_rs::SHIFT_JIS.decode_without_bom_handling(bytes),
+        TextEncoding::Utf8 => (
+            String::from_utf8_lossy(bytes),
+            std::str::from_utf8(bytes).is_err(),
+        ),
+    };
+    if had_errors {
+        return Err("native save contains text invalid for the selected encoding".into());
+    }
+    Ok(Text {
+        text: text.into_owned(),
+        bytes: bytes.to_vec(),
+        had_errors: false,
+    })
+}
+
+fn native_name(name: &str, encoding: TextEncoding) -> Result<Vec<u8>> {
+    let (bytes, had_errors) = match encoding {
+        TextEncoding::Gbk => {
+            let (bytes, _, errors) = encoding_rs::GBK.encode(name);
+            (bytes, errors)
+        }
+        TextEncoding::ShiftJis => {
+            let (bytes, _, errors) = encoding_rs::SHIFT_JIS.encode(name);
+            (bytes, errors)
+        }
+        TextEncoding::Utf8 => (std::borrow::Cow::Borrowed(name.as_bytes()), false),
+    };
+    if had_errors || bytes.contains(&0) {
+        return Err("script name cannot be represented by the native save encoding".into());
+    }
+    Ok(bytes.into_owned())
+}
+
+impl Vm {
+    /// Flatten scheduler-independent local activations into original Yuka frames.
+    pub fn export_native_frames(
+        &self,
+        resolve_name: impl Fn(&Arc<Script>) -> Result<String>,
+    ) -> Result<Vec<NativeFrame>> {
+        let mut result = Vec::with_capacity(self.frames.len() + 1);
+        for frame in &self.frames {
+            let mut caller = Self::new_owned(Arc::clone(&frame.script));
+            caller.pc = frame.return_pc;
+            caller.memory = frame.memory.clone();
+            caller.target = frame.return_target.clone();
+            caller.awaiting_return = caller.target.is_some();
+            result.push(caller.export_native_frame(resolve_name(&frame.script)?, true)?);
+        }
+        let suspended = matches!(self.pending_host_call(), Some(Event::HostCall { function, .. }) if function == "ScriptCall");
+        result.push(self.export_native_frame(resolve_name(&self.script)?, suspended)?);
+        Ok(result)
+    }
+
+    fn export_native_frame(&self, name: String, suspended: bool) -> Result<NativeFrame> {
+        let next = self
+            .pending_call
+            .as_ref()
+            .map_or(self.pc, |(_, next)| *next);
+        let current = if suspended { next } else { self.pc };
+        self.validate_boundary(current)?;
+        self.validate_boundary(next)?;
+        let mut locals = Vec::new();
+        locals.try_reserve_exact(self.script.header.max_locals as usize)?;
+        locals.resize_with(self.script.header.max_locals as usize, NativeValue::default);
+        let mut frame = NativeFrame {
+            name: native_name(&name.replace('/', "\\"), self.script.encoding)?,
+            code: self.script.code.clone(),
+            index: self
+                .script
+                .entries
+                .iter()
+                .map(|entry| {
+                    let [a, b, c] = entry.fields;
+                    [entry.kind, a, b, if entry.kind == 0 { 0 } else { c }]
+                })
+                .collect(),
+            data: self.script.data.clone(),
+            locals,
+            ..Default::default()
+        };
+        for (slot, value) in &self.memory {
+            match (slot, value) {
+                (Slot::DataWord { offset }, Value::Integer(value)) => {
+                    write_u32(&mut frame.data, *offset as usize, *value as u32)?;
+                }
+                (Slot::Local { id }, Value::Integer(value)) => {
+                    *frame
+                        .locals
+                        .get_mut(*id as usize)
+                        .ok_or("native local exceeds MaxLocals")? = NativeValue {
+                        kind: 1,
+                        integer: *value,
+                        bytes: Vec::new(),
+                    };
+                }
+                (Slot::Local { id }, Value::String(value)) => {
+                    *frame
+                        .locals
+                        .get_mut(*id as usize)
+                        .ok_or("native local exceeds MaxLocals")? = NativeValue {
+                        kind: 2,
+                        integer: 0,
+                        bytes: value.bytes.clone(),
+                    };
+                }
+                (Slot::Local { .. } | Slot::DataWord { .. }, _) => {
+                    return Err("unsupported native frame-local value".into());
+                }
+                _ => {}
+            }
+        }
+        for entry in &mut frame.index {
+            if entry[0] == 0x0a {
+                entry[0] = match frame.locals.get(entry[2] as usize).map(|value| value.kind) {
+                    Some(1) => 0x0b,
+                    Some(2) => 0x0c,
+                    Some(0) => 0x0a,
+                    _ => return Err("native local index exceeds MaxLocals".into()),
+                };
+            }
+        }
+        write_u32(&mut frame.header, 0x28, current)?;
+        write_u32(&mut frame.header, 0x2c, next)?;
+        write_u32(&mut frame.header, 0x38, 1)?;
+        write_u32(&mut frame.header, 0x3c, 1)?;
+        if let Some(target) = &self.target {
+            let index = self
+                .script
+                .entries
+                .iter()
+                .enumerate()
+                .find_map(|(index, _)| {
+                    (self.slot(index as u32).ok().as_ref() == Some(target)).then_some(index as u32)
+                })
+                .ok_or("native return target has no script index entry")?;
+            write_u32(&mut frame.header, 0x30, index)?;
+            frame.header[0x34] = 1;
+        }
+        Ok(frame)
+    }
+
+    /// Restore one native activation against its matching game resource.
+    /// Suspended ancestors become scheduler-owned ScriptCall continuations.
+    pub fn from_native_frame(
+        frame: &NativeFrame,
+        encoding: TextEncoding,
+        mut resolve_script: impl FnMut(&str) -> Result<Arc<Script>>,
+        suspended: bool,
+    ) -> Result<Self> {
+        if frame.header.len() != 0x50 || read_u32(&frame.header, 0)? != 0x50 {
+            return Err("unsupported native VM frame header".into());
+        }
+        if read_u32(&frame.header, 0x48)? != 0 {
+            return Err("native SelectID state is not supported by this runtime profile".into());
+        }
+        let name = native_text(&frame.name, encoding)?;
+        let script = resolve_script(&name.text)?;
+        if script.encoding != encoding || frame.locals.len() != script.header.max_locals as usize {
+            return Err("native script encoding or local count differs from the resource".into());
+        }
+        let mut vm = Self::new_owned(script);
+        vm.initialize_default_banks();
+        if !frame.code.is_empty() || !frame.index.is_empty() || !frame.data.is_empty() {
+            if frame.code != vm.script.code
+                || frame.index.len() != vm.script.entries.len()
+                || frame.data.len() != vm.script.data.len()
+            {
+                return Err("native embedded script dimensions differ from the resource".into());
+            }
+            for (index, (record, expected)) in
+                frame.index.iter().zip(&vm.script.entries).enumerate()
+            {
+                let [kind, a, b, c] = *record;
+                let local_kind_matches = expected.kind == 0x0a
+                    && matches!(kind, 0x0b | 0x0c)
+                    && frame
+                        .locals
+                        .get(b as usize)
+                        .is_some_and(|value| value.kind == kind - 0x0a);
+                if (kind != expected.kind && !local_kind_matches)
+                    || a != expected.fields[0]
+                    || b != expected.fields[1]
+                    || (kind != 0 && c != expected.fields[2])
+                {
+                    return Err(format!("native embedded script index {index} differs from the resource: {record:x?} / kind={:x} fields={:x?}", expected.kind, expected.fields).into());
+                }
+            }
+            let mut expected_data = vm.script.data.clone();
+            for entry in &vm.script.entries {
+                if matches!(entry.element, Element::Integer { .. }) {
+                    let offset = entry.fields[1];
+                    let value = read_u32(&frame.data, offset as usize)?;
+                    if value != read_u32(&expected_data, offset as usize)? {
+                        vm.memory
+                            .insert(Slot::DataWord { offset }, Value::Integer(value as i32));
+                    }
+                    write_u32(&mut expected_data, offset as usize, value)?;
+                }
+            }
+            if expected_data != frame.data {
+                return Err(
+                    "native embedded script data differs outside mutable integer words".into(),
+                );
+            }
+        }
+        for (id, local) in frame.locals.iter().enumerate() {
+            let value = match local.kind {
+                0 => continue,
+                1 => Value::Integer(local.integer),
+                2 => Value::String(native_text(&local.bytes, encoding)?),
+                _ => return Err("unsupported native local register kind".into()),
+            };
+            vm.memory.insert(Slot::Local { id: id as u32 }, value);
+        }
+        vm.pc = read_u32(&frame.header, 0x28)?;
+        let next = read_u32(&frame.header, 0x2c)?;
+        vm.validate_boundary(vm.pc)?;
+        vm.validate_boundary(next)?;
+        if frame.header[0x34] != 0 {
+            vm.target = Some(vm.slot(read_u32(&frame.header, 0x30)?)?);
+            vm.awaiting_return = true;
+        }
+        if suspended {
+            let instruction = vm
+                .script
+                .disassemble()?
+                .into_iter()
+                .find(|instruction| {
+                    vm.script
+                        .instruction_at(instruction.word_offset)
+                        .is_ok_and(|(_, end)| end == next)
+                })
+                .ok_or("native suspended frame has no caller instruction")?;
+            let InstructionKind::Call { arguments } = instruction.kind else {
+                return Err("native suspended frame does not follow a call".into());
+            };
+            if !matches!(&vm.script.entry(instruction.entry_index)?.element, Element::Function { name } if name.text == "ScriptCall")
+                || arguments.len() != 1
+            {
+                return Err("native suspended frame does not follow ScriptCall".into());
+            }
+            let arguments = arguments
+                .into_iter()
+                .map(|index| vm.value(index))
+                .collect::<Result<Vec<_>>>()?;
+            vm.pc = instruction.word_offset;
+            vm.pending_call = Some((
+                Event::HostCall {
+                    word_offset: vm.pc,
+                    function: "ScriptCall".into(),
+                    arguments,
+                    destination: vm.target.clone(),
+                },
+                next,
+            ));
+        }
+        Ok(vm)
     }
 }
 
@@ -1491,6 +1761,158 @@ mod tests {
         invalid.insert(Slot::Local { id: 0 }, Value::Integer(1));
         assert!(vm.replace_shared_memory(invalid).is_err());
         assert!(matches!(vm.memory().get(&flag), Some(Value::Integer(1))));
+    }
+
+    #[test]
+    fn native_external_frame_restores_registers_mutable_data_and_return_target() {
+        let mut script = script();
+        script.header.max_locals = 1;
+        script.entries[3].element = Element::Function {
+            name: text("ScriptCall"),
+        };
+        let path = script.entries.len() as u32;
+        script.entries.push(IndexEntry {
+            kind: 5,
+            fields: [0, 0, 0],
+            element: Element::String {
+                value: text("child.yks"),
+            },
+        });
+        script.entries.push(IndexEntry {
+            kind: 0x0a,
+            fields: [0, 0, 0],
+            element: Element::Local { id: 0 },
+        });
+        script.code = vec![0, 1, 0, 3, 1, path];
+        let script = Arc::new(script);
+        let mut original = Vm::new_owned(Arc::clone(&script));
+        original.initialize_default_banks();
+        original
+            .set_variable(Slot::DataWord { offset: 4 }, Value::Integer(99))
+            .unwrap();
+        original
+            .set_variable(Slot::Local { id: 0 }, Value::String(text("local text")))
+            .unwrap();
+        original.step().unwrap();
+        original.step().unwrap();
+        original.step().unwrap();
+        let frames = original
+            .export_native_frames(|_| Ok("caller.yks".into()))
+            .unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].index.last().unwrap()[0], 0x0c);
+        assert_eq!(frames[0].header[0x34], 1);
+        let mut restored = Vm::from_native_frame(
+            &frames[0],
+            TextEncoding::ShiftJis,
+            |_| Ok(Arc::clone(&script)),
+            true,
+        )
+        .unwrap();
+        assert_eq!(restored.pending_host_call(), original.pending_host_call());
+        restored
+            .resume_script_call(Some(Value::Integer(8)))
+            .unwrap();
+        original
+            .resume_script_call(Some(Value::Integer(8)))
+            .unwrap();
+        assert_eq!(restored.pc, original.pc);
+        assert_eq!(restored.memory(), original.memory());
+        let mut corrupt = frames[0].clone();
+        corrupt.code[0] = u32::MAX;
+        assert!(
+            Vm::from_native_frame(
+                &corrupt,
+                TextEncoding::ShiftJis,
+                |_| Ok(Arc::clone(&script)),
+                true
+            )
+            .is_err()
+        );
+        let mut corrupt = frames[0].clone();
+        write_u32(&mut corrupt.header, 0x28, 2).unwrap();
+        assert!(
+            Vm::from_native_frame(
+                &corrupt,
+                TextEncoding::ShiftJis,
+                |_| Ok(Arc::clone(&script)),
+                true
+            )
+            .is_err()
+        );
+        let mut corrupt = frames[0].clone();
+        write_u32(&mut corrupt.header, 0x48, 1).unwrap();
+        let error = Vm::from_native_frame(
+            &corrupt,
+            TextEncoding::ShiftJis,
+            |_| Ok(Arc::clone(&script)),
+            true,
+        )
+        .err()
+        .expect("SelectID frames must be rejected");
+        assert!(error.to_string().contains("SelectID"));
+    }
+
+    #[test]
+    fn native_local_call_stack_flattens_and_resumes_with_return_value() {
+        let mut script = script();
+        script.entries[3].element = Element::Function {
+            name: text("ScriptCall"),
+        };
+        let sub = add_control(&mut script, "SUB", 8);
+        let host = script.entries.len() as u32;
+        script.entries.push(IndexEntry {
+            kind: 0,
+            fields: [0; 3],
+            element: Element::Function {
+                name: text("KeyWait"),
+            },
+        });
+        let ret = script.entries.len() as u32;
+        script.entries.push(IndexEntry {
+            kind: 0,
+            fields: [0; 3],
+            element: Element::Function {
+                name: text("Return"),
+            },
+        });
+        script.code = vec![0, 1, 0, 3, 1, sub, ret, 0, sub, host, 0, ret, 1, 2];
+        let script = Arc::new(script);
+        let mut original = Vm::new_owned(Arc::clone(&script));
+        original.initialize_default_banks();
+        original.step().unwrap();
+        original.step().unwrap();
+        assert!(matches!(original.step().unwrap(), Event::Call { .. }));
+        assert!(matches!(original.step().unwrap(), Event::Label { .. }));
+        assert!(matches!(original.step().unwrap(), Event::HostCall { .. }));
+        let frames = original
+            .export_native_frames(|_| Ok("caller.yks".into()))
+            .unwrap();
+        assert_eq!(frames.len(), 2);
+        let mut caller = Vm::from_native_frame(
+            &frames[0],
+            TextEncoding::ShiftJis,
+            |_| Ok(Arc::clone(&script)),
+            true,
+        )
+        .unwrap();
+        let mut child = Vm::from_native_frame(
+            &frames[1],
+            TextEncoding::ShiftJis,
+            |_| Ok(Arc::clone(&script)),
+            false,
+        )
+        .unwrap();
+        assert_eq!(child.step().unwrap(), original.step().unwrap());
+        child.resume_host(None).unwrap();
+        original.resume_host(None).unwrap();
+        let Event::Returned { value, .. } = child.step().unwrap() else {
+            panic!("expected child return")
+        };
+        caller.resume_script_call(value).unwrap();
+        original.step().unwrap();
+        assert_eq!(caller.pc, original.pc);
+        assert_eq!(caller.memory(), original.memory());
     }
 
     #[test]

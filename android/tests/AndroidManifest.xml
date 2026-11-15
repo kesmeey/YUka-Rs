@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.yukars.player.tests">
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
+    <application android:label="Yuka RS integration tests" android:hasCode="true">
+        <provider android:name="org.yukars.player.FixtureSetupProvider"
+            android:authorities="org.yukars.player.tests.fixture" android:exported="true" />
+        <provider android:name="org.yukars.player.FixtureDocumentsProvider"
+            android:authorities="org.yukars.player.tests.documents" android:exported="true" android:grantUriPermissions="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS" />
+    </application>
+    <instrumentation android:name="org.yukars.player.SmokeInstrumentation"
+        android:targetPackage="org.yukars.player" android:label="Yuka RS native playback smoke" />
+    <instrumentation android:name="org.yukars.player.AudioFocusInstrumentation"
+        android:targetPackage="org.yukars.player" android:label="Yuka RS foreground audio focus" />
+</manifest>

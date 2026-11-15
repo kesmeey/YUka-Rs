@@ -33,6 +33,14 @@ struct Save {
     pages: usize,
     page_limit: usize,
     chapter: String,
+    #[serde(default)]
+    window_title: String,
+    #[serde(default)]
+    page_voice_paths: String,
+    #[serde(default)]
+    native_selection: super::native_persistence::NativeSelection,
+    #[serde(default)]
+    native_selection_visibility: BTreeMap<i32, bool>,
     random_state: u64,
     scripts: Vec<VmCheckpoint>,
     layers: Vec<SavedLayer>,
@@ -67,7 +75,8 @@ impl Runtime {
     }
 
     pub fn restart(&mut self) -> Result<()> {
-        let mut replacement = Self::new(
+        self.flush_native_globals()?;
+        let mut replacement = Self::new_unstarted(
             &self.directory,
             &self.entry,
             self.encoding,
@@ -76,6 +85,8 @@ impl Runtime {
             self.page_limit,
         )?;
         replacement.save_directory = self.save_directory.clone();
+        replacement.load_native_globals()?;
+        replacement.drive()?;
         *self = replacement;
         Ok(())
     }
@@ -163,6 +174,11 @@ impl Runtime {
             .vm
             .resume_selection(index)?;
         self.scene.choices.clear();
+        for (slot, visible) in std::mem::take(&mut self.native_selection_visibility) {
+            if let Some(layer) = self.scene.layers.get_mut(&slot) {
+                layer.visible = visible;
+            }
+        }
         self.waiting = Waiting::Ready;
         self.drive()
     }
@@ -208,6 +224,10 @@ impl Runtime {
             pages: self.pages,
             page_limit: self.page_limit,
             chapter: self.chapter.clone(),
+            window_title: self.window_title.clone(),
+            page_voice_paths: self.page_voice_paths.clone(),
+            native_selection: self.native_selection.clone(),
+            native_selection_visibility: self.native_selection_visibility.clone(),
             scripts,
             layers,
             random_state: self.random_state,
@@ -337,6 +357,7 @@ impl Runtime {
                 return Err("invalid saved sound".into());
             }
             sound.load(slot, &state.path, resources.read(&state.path)?)?;
+            sound.set_streamed(slot, state.streamed);
             sound.volume(slot, state.volume);
             if state.playing {
                 sound.play(slot, state.looping)?;
@@ -361,6 +382,10 @@ impl Runtime {
         self.pages = save.pages;
         self.page_limit = save.page_limit;
         self.chapter = save.chapter;
+        self.window_title = save.window_title;
+        self.page_voice_paths = save.page_voice_paths;
+        self.native_selection = save.native_selection;
+        self.native_selection_visibility = save.native_selection_visibility;
         self.random_state = save.random_state;
         self.waiting = if self.scene.choices.is_empty() {
             Waiting::Key
@@ -382,7 +407,7 @@ impl Runtime {
     }
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(super) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let parent = path
         .parent()
