@@ -1,0 +1,125 @@
+use crate::{
+    Result,
+    archive::Archive,
+    graphics::Ykg,
+    script::{Script, TextEncoding},
+};
+use image::RgbaImage;
+use std::{collections::BTreeMap, path::Path, sync::Arc};
+
+fn key(name: &str) -> String {
+    name.replace('\\', "/").to_ascii_lowercase()
+}
+
+pub struct Resources {
+    archives: Vec<Archive>,
+    members: BTreeMap<String, (usize, usize)>,
+    images: BTreeMap<String, Arc<RgbaImage>>,
+    scripts: BTreeMap<String, Arc<Script>>,
+    encoding: TextEncoding,
+    pub loaded_images: usize,
+    pub loaded_scripts: usize,
+}
+
+impl Resources {
+    pub fn open(directory: &Path, encoding: TextEncoding) -> Result<Self> {
+        let mut paths = Vec::new();
+        for item in std::fs::read_dir(directory)? {
+            let item = item?;
+            let name = item.file_name().to_string_lossy().to_ascii_lowercase();
+            if item.file_type()?.is_file() && name.starts_with("data") && name.ends_with(".ykc") {
+                paths.push(item.path());
+            }
+        }
+        paths.sort();
+        if paths.is_empty() {
+            return Err("no data*.ykc archives found".into());
+        }
+        let mut archives = Vec::new();
+        let mut members = BTreeMap::new();
+        for path in paths {
+            let archive = Archive::open(path)?;
+            let mut local_names = std::collections::BTreeSet::new();
+            for (index, entry) in archive.entries.iter().enumerate() {
+                if entry.name_had_errors {
+                    return Err(
+                        format!("undecodable resource name in {}", archive.path.display()).into(),
+                    );
+                }
+                let name = key(&entry.name);
+                if !local_names.insert(name.clone()) {
+                    return Err(format!("ambiguous resource name {}", entry.name).into());
+                }
+                // Higher-numbered data archives override earlier archives.
+                members.insert(name, (archives.len(), index));
+            }
+            archives.push(archive);
+        }
+        Ok(Self {
+            archives,
+            members,
+            images: BTreeMap::new(),
+            scripts: BTreeMap::new(),
+            encoding,
+            loaded_images: 0,
+            loaded_scripts: 0,
+        })
+    }
+
+    pub fn read(&mut self, name: &str) -> Result<Vec<u8>> {
+        let &(archive, index) = self
+            .members
+            .get(&key(name))
+            .ok_or_else(|| format!("resource not found: {name}"))?;
+        self.archives[archive].read_entry(index, 256 * 1024 * 1024)
+    }
+
+    pub fn script(&mut self, name: &str) -> Result<Arc<Script>> {
+        let name_key = key(name);
+        if let Some(script) = self.scripts.get(&name_key) {
+            return Ok(script.clone());
+        }
+        let script = Arc::new(Script::parse_with_encoding(
+            &self.read(name)?,
+            self.encoding,
+        )?);
+        script.disassemble()?;
+        self.loaded_scripts += 1;
+        self.scripts.insert(name_key, script.clone());
+        Ok(script)
+    }
+
+    pub fn script_name(&self, script: &Arc<Script>) -> Option<&str> {
+        self.scripts
+            .iter()
+            .find_map(|(name, loaded)| Arc::ptr_eq(script, loaded).then_some(name.as_str()))
+    }
+
+    pub fn image(&mut self, name: &str) -> Result<Arc<RgbaImage>> {
+        let name_key = key(name);
+        if let Some(image) = self.images.get(&name_key) {
+            return Ok(image.clone());
+        }
+        let bytes = self.read(name)?;
+        let ykg = Ykg::parse(&bytes)?;
+        let color = ykg.color.as_ref().ok_or("YKG has no color image")?;
+        let mut image = image::load_from_memory(&color.normalized_bytes())?.into_rgba8();
+        if let Some(alpha) = &ykg.alpha {
+            let mask = image::load_from_memory(&alpha.normalized_bytes())?.into_luma8();
+            if image.dimensions() != mask.dimensions() {
+                return Err("YKG alpha dimensions differ from color".into());
+            }
+            for (pixel, mask) in image.pixels_mut().zip(mask.pixels()) {
+                pixel[3] = mask[0];
+            }
+        }
+        let image = Arc::new(image);
+        // Keep a small working set. Scene layers retain their own Arc references.
+        if self.images.len() >= 24 {
+            self.images.clear();
+        }
+        self.loaded_images += 1;
+        self.images.insert(name_key, image.clone());
+        Ok(image)
+    }
+}

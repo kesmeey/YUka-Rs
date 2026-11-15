@@ -1,0 +1,500 @@
+//! A bounded desktop host for Yuka's ordinary opening-story commands.
+use crate::{
+    Result,
+    desktop::{Layer, Scene},
+    resources::Resources,
+    script::{Text, TextEncoding},
+    sound::Sound,
+    vm::{Event, Slot, Value, Vm},
+};
+use serde::Serialize;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    time::{Duration, Instant},
+};
+
+pub const DEFAULT_SCRIPT: &str = "yks\\story\\common\\PROLOGUE1.YKS";
+
+struct Activation {
+    name: String,
+    vm: Vm,
+}
+enum Waiting {
+    Ready,
+    Key,
+    Timer(Instant),
+    Sound(i32),
+}
+struct Scroll {
+    slot: i32,
+    from: (i32, i32),
+    to: (i32, i32),
+    start: Instant,
+    duration: Duration,
+}
+struct Fade {
+    start: Instant,
+    duration: Duration,
+}
+
+#[derive(Serialize)]
+pub struct DemoReport {
+    pub pages: usize,
+    pub instructions: usize,
+    pub images_decoded: usize,
+    pub scripts_loaded: usize,
+    pub sounds_decoded: usize,
+    pub audio_enabled: bool,
+    pub audio_warning: Option<String>,
+    pub script: String,
+    pub pc: u32,
+    pub finished: bool,
+    pub host_commands: BTreeMap<String, usize>,
+    pub approximations: BTreeSet<String>,
+}
+
+pub struct Runtime {
+    pub scene: Scene,
+    resources: Resources,
+    sound: Sound,
+    stack: Vec<Activation>,
+    waiting: Waiting,
+    scrolls: Vec<Scroll>,
+    fade: Option<Fade>,
+    draw_before: Option<BTreeMap<i32, Layer>>,
+    fast: bool,
+    page_limit: usize,
+    pub pages: usize,
+    instructions: usize,
+    commands: BTreeMap<String, usize>,
+    approximations: BTreeSet<String>,
+}
+
+fn int(arguments: &[Value], index: usize) -> Result<i32> {
+    match arguments.get(index) {
+        Some(Value::Integer(value)) => Ok(*value),
+        _ => Err(format!("argument {index} must be an integer").into()),
+    }
+}
+fn string(arguments: &[Value], index: usize) -> Result<&str> {
+    match arguments.get(index) {
+        Some(Value::String(value)) => Ok(&value.text),
+        _ => Err(format!("argument {index} must be a string").into()),
+    }
+}
+fn duration(value: i32) -> Duration {
+    Duration::from_millis(value.max(0) as u64)
+}
+fn text_value(text: &str) -> Value {
+    Value::String(Text {
+        text: text.to_string(),
+        bytes: encoding_rs::GBK.encode(text).0.into_owned(),
+        had_errors: false,
+    })
+}
+
+impl Runtime {
+    pub fn new(
+        directory: &Path,
+        entry: &str,
+        encoding: TextEncoding,
+        fast: bool,
+        muted: bool,
+        pages: usize,
+    ) -> Result<Self> {
+        let mut resources = Resources::open(directory, encoding)?;
+        let mut vm = Vm::new_owned(resources.script(entry)?);
+        vm.initialize_default_banks();
+        // The demo enters the ordinary story directly, with the game's default protagonist name.
+        for (id, name) in [(20, "爱泽"), (21, "晴树"), (22, "爱泽晴树")] {
+            vm.set_variable(
+                Slot::StringVariable {
+                    bank: "String".into(),
+                    id,
+                },
+                text_value(name),
+            )?;
+            vm.set_variable(
+                Slot::StringVariable {
+                    bank: "GlobalString".into(),
+                    id,
+                },
+                text_value(name),
+            )?;
+        }
+        let mut runtime = Self {
+            scene: Scene::default(),
+            resources,
+            sound: Sound::new(muted),
+            stack: vec![Activation {
+                name: entry.into(),
+                vm,
+            }],
+            waiting: Waiting::Ready,
+            scrolls: Vec::new(),
+            fade: None,
+            draw_before: None,
+            fast,
+            page_limit: pages,
+            pages: 0,
+            instructions: 0,
+            commands: BTreeMap::new(),
+            approximations: BTreeSet::new(),
+        };
+        runtime.drive()?;
+        Ok(runtime)
+    }
+
+    pub fn report(&self) -> DemoReport {
+        DemoReport {
+            pages: self.pages,
+            instructions: self.instructions,
+            images_decoded: self.resources.loaded_images,
+            scripts_loaded: self.resources.loaded_scripts,
+            sounds_decoded: self.sound.decoded_sounds,
+            audio_enabled: self.sound.enabled(),
+            audio_warning: self.sound.warning.clone(),
+            script: self.stack.last().map_or(String::new(), |a| a.name.clone()),
+            pc: self.stack.last().map_or(0, |a| a.vm.pc),
+            finished: self.scene.finished,
+            host_commands: self.commands.clone(),
+            approximations: self.approximations.clone(),
+        }
+    }
+
+    fn status(&mut self) {
+        self.scene.status = if self.scene.finished {
+            format!("Demo 已结束 · 共 {} 页", self.pages)
+        } else if self.page_limit == 0 {
+            format!("第 {} 页", self.pages)
+        } else {
+            format!("第 {} / {} 页", self.pages, self.page_limit)
+        };
+        if self.sound.warning.is_some() {
+            self.scene.status.push_str(" · 静音（音频设备不可用）");
+        }
+    }
+
+    pub fn advance(&mut self) -> Result<()> {
+        if self.scene.finished {
+            return Ok(());
+        }
+        if matches!(self.waiting, Waiting::Key) {
+            if self.page_limit != 0 && self.pages >= self.page_limit {
+                self.scene.finished = true;
+                self.sound.stop_all();
+                self.status();
+                return Ok(());
+            }
+            self.waiting = Waiting::Ready;
+            self.drive()?;
+        }
+        Ok(())
+    }
+
+    pub fn tick(&mut self) -> Result<bool> {
+        if self.scene.finished {
+            return Ok(false);
+        }
+        self.sound.tick();
+        let now = Instant::now();
+        let mut changed = false;
+        for scroll in &self.scrolls {
+            let t = (now.duration_since(scroll.start).as_secs_f32()
+                / scroll.duration.as_secs_f32().max(0.001))
+            .min(1.0);
+            if let Some(layer) = self.scene.layers.get_mut(&scroll.slot) {
+                layer.x = (scroll.from.0 as f32 + (scroll.to.0 - scroll.from.0) as f32 * t) as i32;
+                layer.y = (scroll.from.1 as f32 + (scroll.to.1 - scroll.from.1) as f32 * t) as i32;
+                changed = true;
+            }
+        }
+        self.scrolls
+            .retain(|scroll| now.duration_since(scroll.start) < scroll.duration);
+        if let Some(fade) = &self.fade {
+            let t = (now.duration_since(fade.start).as_secs_f32()
+                / fade.duration.as_secs_f32().max(0.001))
+            .min(1.0);
+            self.scene.transition_progress = t;
+            changed = true;
+            if t >= 1.0 {
+                self.fade = None;
+                self.scene.transition_from = None;
+            }
+        }
+        let ready = match self.waiting {
+            Waiting::Timer(deadline) => now >= deadline,
+            Waiting::Sound(slot) => !self.sound.is_playing(slot),
+            _ => false,
+        };
+        if ready {
+            self.waiting = Waiting::Ready;
+            self.drive()?;
+            changed = true;
+        }
+        Ok(changed)
+    }
+
+    fn finish_script(&mut self, value: Option<Value>) -> Result<()> {
+        let completed = self.stack.pop().ok_or("empty script stack")?;
+        if let Some(caller) = self.stack.last_mut() {
+            caller
+                .vm
+                .replace_shared_memory(completed.vm.shared_memory())?;
+            caller.vm.resume_script_call(value)?;
+        } else {
+            self.scene.finished = true;
+            self.sound.stop_all();
+        }
+        Ok(())
+    }
+
+    fn drive(&mut self) -> Result<()> {
+        for _ in 0..20000 {
+            if self.scene.finished || !matches!(self.waiting, Waiting::Ready) {
+                self.status();
+                return Ok(());
+            }
+            let current = self.stack.last_mut().ok_or("empty script stack")?;
+            if let Some(name) = self.resources.script_name(current.vm.current_script()) {
+                current.name = name.to_owned();
+            }
+            let event = current
+                .vm
+                .step()
+                .map_err(|e| format!("{} @{}: {e}", current.name, current.vm.pc))?;
+            self.instructions += 1;
+            match event {
+                Event::Halted => self.finish_script(None)?,
+                Event::Returned {
+                    destination: None,
+                    value,
+                    ..
+                } => self.finish_script(value)?,
+                Event::HostCall {
+                    function,
+                    arguments,
+                    word_offset,
+                    ..
+                } => {
+                    *self.commands.entry(function.clone()).or_default() += 1;
+                    if matches!(function.as_str(), "ScriptCall" | "ScriptJump") {
+                        let name = string(&arguments, 0)?.to_owned();
+                        if arguments.len() != 1 {
+                            return Err(
+                                "file script calls with arguments are not implemented in this demo"
+                                    .into(),
+                            );
+                        }
+                        let script = self.resources.script(&name)?;
+                        if function == "ScriptJump" {
+                            let current = self.stack.last_mut().unwrap();
+                            current.vm.resume_script_jump(script)?;
+                            current.name = name;
+                            continue;
+                        }
+                        if self.stack.len() >= 64 {
+                            return Err("script call depth exceeds 64".into());
+                        }
+                        let memory = self.stack.last().unwrap().vm.shared_memory();
+                        let mut vm = Vm::new_owned(script);
+                        vm.initialize_default_banks();
+                        vm.replace_shared_memory(memory)?;
+                        self.stack.push(Activation { name, vm });
+                    } else {
+                        let result = self.host(&function, &arguments).map_err(|e| {
+                            format!(
+                                "{} @{word_offset} {function}: {e}",
+                                self.stack.last().unwrap().name
+                            )
+                        })?;
+                        self.stack.last_mut().unwrap().vm.resume_host(result)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Err("script exceeded 20000 instructions without an input/timing boundary".into())
+    }
+
+    fn wait(&mut self, milliseconds: i32) {
+        if !self.fast && milliseconds > 0 {
+            self.waiting = Waiting::Timer(Instant::now() + duration(milliseconds));
+        }
+    }
+
+    fn transition(&mut self, milliseconds: i32) {
+        if !self.fast && milliseconds > 0 {
+            self.scene.transition_from = self.draw_before.take();
+            self.scene.transition_progress = 0.0;
+            self.fade = Some(Fade {
+                start: Instant::now(),
+                duration: duration(milliseconds),
+            });
+            self.wait(milliseconds);
+        } else {
+            self.draw_before = None;
+            self.scene.transition_from = None;
+            self.scene.transition_progress = 1.0;
+        }
+    }
+
+    fn host(&mut self, function: &str, args: &[Value]) -> Result<Option<Value>> {
+        match function {
+            "SkipModeCheck" | "AlreadySkipModeCheck" | "AutoModeCheck" => {
+                return Ok(Some(Value::Integer(0)));
+            }
+            "DrawStop" => self.draw_before = Some(self.scene.layers.clone()),
+            "GraphicLoad" => {
+                let slot = int(args, 0)?;
+                let image = self.resources.image(string(args, 1)?)?;
+                self.scrolls.retain(|scroll| scroll.slot != slot);
+                self.scene.layers.insert(
+                    slot,
+                    Layer {
+                        image,
+                        x: int(args, 2)?,
+                        y: int(args, 3)?,
+                        opacity: 255,
+                        visible: true,
+                    },
+                );
+            }
+            "GraphicDelete" => {
+                let slot = int(args, 0)?;
+                self.scene.layers.remove(&slot);
+                self.scrolls.retain(|scroll| scroll.slot != slot);
+            }
+            "GraphicMove" => {
+                let slot = int(args, 0)?;
+                let (x, y) = (int(args, 1)?, int(args, 2)?);
+                self.scrolls.retain(|scroll| scroll.slot != slot);
+                match slot {
+                    11 => self.scene.dialogue_offset = (x - 3, y - 473),
+                    12 => self.scene.speaker_offset = (x, y - 437),
+                    _ => {
+                        let layer = self
+                            .scene
+                            .layers
+                            .get_mut(&slot)
+                            .ok_or_else(|| format!("graphic slot {slot} is not loaded"))?;
+                        layer.x = x;
+                        layer.y = y;
+                    }
+                }
+            }
+            "GraphicShow" | "GraphicHide" => {
+                let visible = function == "GraphicShow";
+                for index in 0..args.len() {
+                    let slot = int(args, index)?;
+                    if (11..=14).contains(&slot) {
+                        self.scene.dialogue_visible = visible;
+                    }
+                    if let Some(layer) = self.scene.layers.get_mut(&slot) {
+                        layer.visible = visible;
+                    }
+                }
+            }
+            "Transition" => {
+                self.approximations
+                    .insert("Transition modes use crossfade".into());
+                self.transition(int(args, 1)?);
+            }
+            "UserTransition" => {
+                self.approximations
+                    .insert("UserTransition masks use crossfade".into());
+                self.transition(int(args, 2)?);
+            }
+            "Wait" => self.wait(int(args, 0)?),
+            "GraphicScroll" => {
+                let slot = int(args, 0)?;
+                let milliseconds = int(args, 1)?;
+                let to = (int(args, 2)?, int(args, 3)?);
+                let layer = self
+                    .scene
+                    .layers
+                    .get_mut(&slot)
+                    .ok_or_else(|| format!("graphic slot {slot} is not loaded"))?;
+                self.scrolls.retain(|scroll| scroll.slot != slot);
+                if self.fast || milliseconds <= 0 {
+                    layer.x = to.0;
+                    layer.y = to.1;
+                } else {
+                    self.scrolls.push(Scroll {
+                        slot,
+                        from: (layer.x, layer.y),
+                        to,
+                        start: Instant::now(),
+                        duration: duration(milliseconds),
+                    });
+                }
+            }
+            "GraphicScrollWait" => {
+                let slot = int(args, 0)?;
+                if let Some(scroll) = self.scrolls.iter().find(|s| s.slot == slot) {
+                    self.waiting = Waiting::Timer(scroll.start + scroll.duration);
+                }
+            }
+            "StrOut" | "StrOutNW" => self.scene.dialogue.push_str(string(args, 0)?),
+            "StrOutNWC" => match int(args, 0)? {
+                14 => self.scene.speaker = string(args, 1)?.to_owned(),
+                13 => self.scene.dialogue.push_str(string(args, 1)?),
+                layer => return Err(format!("StrOutNWC layer {layer} unsupported").into()),
+            },
+            "NameOut" => self.scene.speaker = string(args, 0)?.to_owned(),
+            "KeyWait" => {
+                self.pages += 1;
+                self.waiting = Waiting::Key;
+            }
+            "PF" => {
+                if args.is_empty() {
+                    self.scene.dialogue.clear();
+                    self.scene.speaker.clear();
+                }
+                for index in 0..args.len() {
+                    match int(args, index)? {
+                        13 => self.scene.dialogue.clear(),
+                        14 => self.scene.speaker.clear(),
+                        _ => {}
+                    }
+                }
+            }
+            "SoundLoad" | "SoundLoadStream" => {
+                let bytes = self.resources.read(string(args, 1)?)?;
+                self.sound.load(int(args, 0)?, bytes)?;
+            }
+            "SoundPlay" | "SoundPlayLoop" => {
+                let slot = int(args, 0)?;
+                if args.len() >= 2 {
+                    self.sound
+                        .load(slot, self.resources.read(string(args, 1)?)?)?;
+                }
+                self.sound.play(slot, function == "SoundPlayLoop")?;
+            }
+            "SoundStop" => self.sound.stop(int(args, 0)?),
+            "SoundDelete" => self.sound.delete(int(args, 0)?),
+            "SoundDeleteToFade" => {
+                let milliseconds = if args.len() > 1 { int(args, 1)? } else { 1000 };
+                self.sound
+                    .fade_delete(int(args, 0)?, if self.fast { 0 } else { milliseconds });
+            }
+            "SoundVolume" => self.sound.volume(int(args, 0)?, int(args, 1)?),
+            "SoundPlayWait" => {
+                if !self.fast && self.sound.is_playing(int(args, 0)?) {
+                    self.waiting = Waiting::Sound(int(args, 0)?);
+                }
+            }
+            "FontSet" => {
+                self.approximations
+                    .insert("FontSet uses the demo's common Chinese font".into());
+            }
+            "Effect" => {
+                self.approximations
+                    .insert("Effect screen shake is omitted".into());
+            }
+            _ => return Err(format!("unimplemented host command {function}").into()),
+        }
+        Ok(None)
+    }
+}
