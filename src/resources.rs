@@ -5,10 +5,26 @@ use crate::{
     script::{Script, TextEncoding},
 };
 use image::RgbaImage;
+use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 fn key(name: &str) -> String {
     name.replace('\\', "/").to_ascii_lowercase()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchiveIdentity {
+    pub name: String,
+    pub bytes: u64,
+    pub index_fingerprint: String,
+}
+
+fn fingerprint(bytes: impl IntoIterator<Item = u8>) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 pub struct Resources {
@@ -22,6 +38,35 @@ pub struct Resources {
 }
 
 impl Resources {
+    pub fn manifest(&self) -> Vec<ArchiveIdentity> {
+        self.archives
+            .iter()
+            .map(|archive| {
+                let mut bytes = Vec::new();
+                for entry in &archive.entries {
+                    bytes.extend_from_slice(&entry.name_bytes);
+                    bytes.push(0);
+                    bytes.extend_from_slice(&entry.offset.to_le_bytes());
+                    bytes.extend_from_slice(&entry.size.to_le_bytes());
+                }
+                ArchiveIdentity {
+                    name: archive
+                        .path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                    bytes: archive.file_size,
+                    index_fingerprint: fingerprint(bytes),
+                }
+            })
+            .collect()
+    }
+
+    pub fn game_id(&self) -> Result<String> {
+        Ok(fingerprint(serde_json::to_vec(&self.manifest())?))
+    }
+
     pub fn open(directory: &Path, encoding: TextEncoding) -> Result<Self> {
         let mut paths = Vec::new();
         for item in std::fs::read_dir(directory)? {

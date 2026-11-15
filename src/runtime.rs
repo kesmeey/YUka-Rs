@@ -10,11 +10,14 @@ use crate::{
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 pub const DEFAULT_SCRIPT: &str = "yks\\story\\common\\PROLOGUE1.YKS";
+pub const PLAY_SCRIPT: &str = "yks\\root\\root_Common.yks";
+
+mod persistence;
 
 struct Activation {
     name: String,
@@ -25,6 +28,7 @@ enum Waiting {
     Key,
     Timer(Instant),
     Sound(i32),
+    Choice,
 }
 struct Scroll {
     slot: i32,
@@ -52,6 +56,7 @@ pub struct DemoReport {
     pub finished: bool,
     pub host_commands: BTreeMap<String, usize>,
     pub approximations: BTreeSet<String>,
+    pub choices: Vec<String>,
 }
 
 pub struct Runtime {
@@ -69,6 +74,16 @@ pub struct Runtime {
     instructions: usize,
     commands: BTreeMap<String, usize>,
     approximations: BTreeSet<String>,
+    directory: PathBuf,
+    entry: String,
+    encoding: TextEncoding,
+    muted: bool,
+    paused_at: Option<Instant>,
+    layer_sources: BTreeMap<i32, String>,
+    chapter: String,
+    save_directory: Option<PathBuf>,
+    autosave_requested: bool,
+    random_state: u64,
 }
 
 fn int(arguments: &[Value], index: usize) -> Result<i32> {
@@ -141,6 +156,20 @@ impl Runtime {
             instructions: 0,
             commands: BTreeMap::new(),
             approximations: BTreeSet::new(),
+            directory: directory.into(),
+            entry: entry.into(),
+            encoding,
+            muted,
+            paused_at: None,
+            layer_sources: BTreeMap::new(),
+            chapter: String::new(),
+            save_directory: None,
+            autosave_requested: false,
+            random_state: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64
+                | 1,
         };
         runtime.drive()?;
         Ok(runtime)
@@ -160,6 +189,7 @@ impl Runtime {
             finished: self.scene.finished,
             host_commands: self.commands.clone(),
             approximations: self.approximations.clone(),
+            choices: self.scene.choices.clone(),
         }
     }
 
@@ -177,6 +207,9 @@ impl Runtime {
     }
 
     pub fn advance(&mut self) -> Result<()> {
+        if self.paused_at.is_some() {
+            return Ok(());
+        }
         if self.scene.finished {
             return Ok(());
         }
@@ -194,6 +227,9 @@ impl Runtime {
     }
 
     pub fn tick(&mut self) -> Result<bool> {
+        if self.paused_at.is_some() {
+            return Ok(false);
+        }
         if self.scene.finished {
             return Ok(false);
         }
@@ -254,6 +290,16 @@ impl Runtime {
         for _ in 0..20000 {
             if self.scene.finished || !matches!(self.waiting, Waiting::Ready) {
                 self.status();
+                if self.autosave_requested
+                    && self.can_save()
+                    && let Some(directory) = &self.save_directory
+                {
+                    let result = self.save(&directory.join("auto.json"));
+                    self.autosave_requested = false;
+                    if let Err(error) = result {
+                        self.scene.status = format!("自动存档失败 · {error}");
+                    }
+                }
                 return Ok(());
             }
             let current = self.stack.last_mut().ok_or("empty script stack")?;
@@ -279,6 +325,19 @@ impl Runtime {
                     ..
                 } => {
                     *self.commands.entry(function.clone()).or_default() += 1;
+                    if function == "Select" {
+                        self.scene.choices = self
+                            .stack
+                            .last()
+                            .unwrap()
+                            .vm
+                            .selection_options()?
+                            .into_iter()
+                            .map(|option| option.label)
+                            .collect();
+                        self.waiting = Waiting::Choice;
+                        continue;
+                    }
                     if matches!(function.as_str(), "ScriptCall" | "ScriptJump") {
                         let name = string(&arguments, 0)?.to_owned();
                         if arguments.len() != 1 {
@@ -342,28 +401,68 @@ impl Runtime {
 
     fn host(&mut self, function: &str, args: &[Value]) -> Result<Option<Value>> {
         match function {
+            "Index" => self.chapter = string(args, 0)?.to_owned(),
+            "WindowNameSet" => {
+                let _ = string(args, 0)?;
+            }
+            "SaveDataSave" => self.autosave_requested = true,
+            "RGB" => {
+                let color = if args.len() == 1 {
+                    let rgb = int(args, 0)? as u32;
+                    ((rgb & 255) << 16) | (rgb & 0xff00) | ((rgb >> 16) & 255)
+                } else {
+                    (int(args, 0)? as u32 & 255)
+                        | ((int(args, 1)? as u32 & 255) << 8)
+                        | ((int(args, 2)? as u32 & 255) << 16)
+                };
+                return Ok(Some(Value::Integer(color as i32)));
+            }
+            "Random" => {
+                let limit = int(args, 0)?;
+                if limit < 0 {
+                    return Err("Random requires a nonnegative bound".into());
+                }
+                self.random_state ^= self.random_state << 13;
+                self.random_state ^= self.random_state >> 7;
+                self.random_state ^= self.random_state << 17;
+                return Ok(Some(Value::Integer(
+                    (self.random_state % (limit as u64 + 1)) as i32,
+                )));
+            }
+            "DrawStart" => {
+                self.draw_before = None;
+            }
+            "SoundStopALL" => self.sound.stop_all(),
+            "HistoryReset" => {}
+            "LF" => self.scene.dialogue.push('\n'),
             "SkipModeCheck" | "AlreadySkipModeCheck" | "AutoModeCheck" => {
                 return Ok(Some(Value::Integer(0)));
             }
             "DrawStop" => self.draw_before = Some(self.scene.layers.clone()),
-            "GraphicLoad" => {
+            "GraphicLoad" | "GraphicLoadHide" => {
                 let slot = int(args, 0)?;
-                let image = self.resources.image(string(args, 1)?)?;
+                let name = string(args, 1)?;
+                let image = self.resources.image(name)?;
+                self.layer_sources.insert(slot, name.into());
                 self.scrolls.retain(|scroll| scroll.slot != slot);
                 self.scene.layers.insert(
                     slot,
                     Layer {
                         image,
-                        x: int(args, 2)?,
-                        y: int(args, 3)?,
+                        x: if args.len() >= 4 { int(args, 2)? } else { 0 },
+                        y: if args.len() >= 4 { int(args, 3)? } else { 0 },
                         opacity: 255,
-                        visible: true,
+                        visible: function == "GraphicLoad",
+                        additive_color: [0; 3],
+                        source_rect: None,
+                        sepia_filter: false,
                     },
                 );
             }
             "GraphicDelete" => {
                 let slot = int(args, 0)?;
                 self.scene.layers.remove(&slot);
+                self.layer_sources.remove(&slot);
                 self.scrolls.retain(|scroll| scroll.slot != slot);
             }
             "GraphicMove" => {
@@ -462,13 +561,16 @@ impl Runtime {
             }
             "SoundLoad" | "SoundLoadStream" => {
                 let bytes = self.resources.read(string(args, 1)?)?;
-                self.sound.load(int(args, 0)?, bytes)?;
+                self.sound.load(int(args, 0)?, string(args, 1)?, bytes)?;
             }
             "SoundPlay" | "SoundPlayLoop" => {
                 let slot = int(args, 0)?;
                 if args.len() >= 2 {
-                    self.sound
-                        .load(slot, self.resources.read(string(args, 1)?)?)?;
+                    self.sound.load(
+                        slot,
+                        string(args, 1)?,
+                        self.resources.read(string(args, 1)?)?,
+                    )?;
                 }
                 self.sound.play(slot, function == "SoundPlayLoop")?;
             }

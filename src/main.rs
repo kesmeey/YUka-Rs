@@ -72,6 +72,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Play the original common-story script chain with title menu and save slots.
+    Play {
+        game_dir: PathBuf,
+        #[arg(long, value_enum, default_value_t = Encoding::Gbk)]
+        encoding: Encoding,
+        #[arg(long)]
+        font: Option<PathBuf>,
+        #[arg(long)]
+        mute: bool,
+        #[arg(long)]
+        fast: bool,
+        #[arg(long, default_value = "saves")]
+        save_dir: PathBuf,
+    },
     /// Run an interactive opening-story demo using the original Yuka script and resources.
     Demo {
         game_dir: PathBuf,
@@ -96,6 +110,9 @@ enum Command {
         /// Save runtime counters and approximations to a new JSON file.
         #[arg(long)]
         report: Option<PathBuf>,
+        /// One-based choices to apply during headless execution. Stop at an unspecified choice.
+        #[arg(long, value_delimiter = ',')]
+        choices: Vec<usize>,
     },
     /// Summarize all data*.ykc archives in a game directory without extracting assets.
     Inspect { game_dir: PathBuf },
@@ -182,6 +199,26 @@ fn print_json(value: &impl Serialize) -> Result<()> {
 
 fn run() -> Result<()> {
     match Cli::parse().command {
+        Command::Play {
+            game_dir,
+            encoding,
+            font,
+            mute,
+            fast,
+            save_dir,
+        } => {
+            let mut runtime = yuka_rs::runtime::Runtime::new(
+                &game_dir,
+                yuka_rs::runtime::PLAY_SCRIPT,
+                encoding.into(),
+                fast,
+                mute,
+                0,
+            )?;
+            let directory = save_dir.join(runtime.game_id()?);
+            runtime.configure_save_directory(directory.clone());
+            yuka_rs::desktop::play(&mut runtime, &font_path(font)?, &directory)
+        }
         Command::Demo {
             game_dir,
             script,
@@ -193,20 +230,10 @@ fn run() -> Result<()> {
             headless,
             screenshot,
             report,
+            choices,
         } => {
             use yuka_rs::{desktop::Renderer, runtime::Runtime};
-            let font_path = font
-                .or_else(|| {
-                    [
-                        "C:/Windows/Fonts/msyh.ttc",
-                        "C:/Windows/Fonts/simhei.ttf",
-                        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-                    ]
-                    .into_iter()
-                    .map(PathBuf::from)
-                    .find(|path| path.is_file())
-                })
-                .ok_or("Chinese font not found; supply --font with a TTF/TTC font file")?;
+            let font_path = font_path(font)?;
             for path in [&screenshot, &report].into_iter().flatten() {
                 if path.exists() {
                     return Err(format!("output already exists: {}", path.display()).into());
@@ -225,8 +252,16 @@ fn run() -> Result<()> {
             )?;
             let result = if headless {
                 (|| {
+                    let mut choices = choices.into_iter();
                     while !runtime.scene.finished {
-                        runtime.advance()?;
+                        if runtime.choices().is_empty() {
+                            runtime.advance()?;
+                        } else if let Some(choice) = choices.next() {
+                            runtime
+                                .choose(choice.checked_sub(1).ok_or("choices are one-based")?)?;
+                        } else {
+                            break;
+                        }
                     }
                     Ok(())
                 })()
@@ -389,6 +424,20 @@ fn run() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn font_path(font: Option<PathBuf>) -> Result<PathBuf> {
+    font.or_else(|| {
+        [
+            "C:/Windows/Fonts/msyh.ttc",
+            "C:/Windows/Fonts/simhei.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
+    })
+    .ok_or_else(|| "Chinese font not found; supply --font with a TTF/TTC font file".into())
 }
 
 fn export_graphics(image: &Ykg<'_>, directory: &Path) -> Result<()> {

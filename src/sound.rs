@@ -1,5 +1,6 @@
 use crate::Result;
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     io::Cursor,
@@ -13,12 +14,22 @@ struct Fade {
     volume: f32,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SoundState {
+    pub path: String,
+    pub volume: i32,
+    pub looping: bool,
+    pub playing: bool,
+}
+
 pub struct Sound {
     stream: Option<(OutputStream, OutputStreamHandle)>,
     data: BTreeMap<i32, Arc<[u8]>>,
     sinks: BTreeMap<i32, Sink>,
     volumes: BTreeMap<i32, f32>,
     fades: BTreeMap<i32, Fade>,
+    states: BTreeMap<i32, SoundState>,
+    paused_at: Option<Instant>,
     pub warning: Option<String>,
     pub decoded_sounds: usize,
 }
@@ -39,12 +50,14 @@ impl Sound {
             sinks: BTreeMap::new(),
             volumes: BTreeMap::new(),
             fades: BTreeMap::new(),
+            states: BTreeMap::new(),
+            paused_at: None,
             warning,
             decoded_sounds: 0,
         }
     }
 
-    pub fn load(&mut self, slot: i32, bytes: Vec<u8>) -> Result<()> {
+    pub fn load(&mut self, slot: i32, path: &str, bytes: Vec<u8>) -> Result<()> {
         let data: Arc<[u8]> = bytes.into();
         let mut decoder = Decoder::new(Cursor::new(data.clone()))?;
         if decoder.next().is_none() {
@@ -54,6 +67,15 @@ impl Sound {
         self.volumes.remove(&slot);
         self.decoded_sounds += 1;
         self.data.insert(slot, data);
+        self.states.insert(
+            slot,
+            SoundState {
+                path: path.into(),
+                volume: 1000,
+                looping: false,
+                playing: false,
+            },
+        );
         Ok(())
     }
 
@@ -74,10 +96,22 @@ impl Sound {
             }
             self.sinks.insert(slot, sink);
         }
+        if let Some(state) = self.states.get_mut(&slot) {
+            state.looping = looping;
+            state.playing = true;
+        }
+        if self.paused_at.is_some() {
+            for sink in self.sinks.values() {
+                sink.pause();
+            }
+        }
         Ok(())
     }
 
     pub fn volume(&mut self, slot: i32, volume: i32) {
+        if let Some(state) = self.states.get_mut(&slot) {
+            state.volume = volume.clamp(0, 1000);
+        }
         let volume = volume.clamp(0, 1000) as f32 / 1000.0;
         self.volumes.insert(slot, volume);
         if let Some(sink) = self.sinks.get(&slot) {
@@ -102,6 +136,9 @@ impl Sound {
     }
 
     pub fn tick(&mut self) {
+        if self.paused_at.is_some() {
+            return;
+        }
         let now = Instant::now();
         let mut finished = Vec::new();
         for (&slot, fade) in &self.fades {
@@ -121,12 +158,18 @@ impl Sound {
     }
 
     pub fn stop(&mut self, slot: i32) {
+        if let Some(state) = self.states.get_mut(&slot) {
+            state.playing = false;
+        }
         self.fades.remove(&slot);
         if let Some(sink) = self.sinks.remove(&slot) {
             sink.stop();
         }
     }
     pub fn stop_all(&mut self) {
+        for state in self.states.values_mut() {
+            state.playing = false;
+        }
         for sink in self.sinks.values() {
             sink.stop();
         }
@@ -137,11 +180,48 @@ impl Sound {
         self.stop(slot);
         self.data.remove(&slot);
         self.volumes.remove(&slot);
+        self.states.remove(&slot);
     }
     pub fn is_playing(&self, slot: i32) -> bool {
         self.sinks.get(&slot).is_some_and(|sink| !sink.empty())
     }
     pub fn enabled(&self) -> bool {
         self.stream.is_some()
+    }
+
+    pub fn is_stable(&self) -> bool {
+        self.fades.is_empty()
+    }
+
+    pub fn snapshot(&self) -> Vec<(i32, SoundState)> {
+        self.states
+            .iter()
+            .map(|(&slot, state)| {
+                let mut state = state.clone();
+                if self.stream.is_some() {
+                    state.playing = self.is_playing(slot);
+                }
+                (slot, state)
+            })
+            .collect()
+    }
+
+    pub fn set_paused(&mut self, paused: bool) {
+        if paused {
+            if self.paused_at.is_none() {
+                self.paused_at = Some(Instant::now());
+            }
+            for sink in self.sinks.values() {
+                sink.pause();
+            }
+        } else if let Some(start) = self.paused_at.take() {
+            let elapsed = start.elapsed();
+            for fade in self.fades.values_mut() {
+                fade.start += elapsed;
+            }
+            for sink in self.sinks.values() {
+                sink.play();
+            }
+        }
     }
 }

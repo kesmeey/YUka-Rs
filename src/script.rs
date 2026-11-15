@@ -4,11 +4,11 @@
 //! Disassembler.cs and DataElement.cs. See docs/yks.md for provenance.
 use crate::Result;
 use encoding_rs::{GBK, SHIFT_JIS};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::ops::Range;
 
-#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TextEncoding {
     #[default]
     ShiftJis,
@@ -16,7 +16,7 @@ pub enum TextEncoding {
     Utf8,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Text {
     pub text: String,
     pub bytes: Vec<u8>,

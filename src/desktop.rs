@@ -8,8 +8,9 @@ use minifb::{Key, KeyRepeat, MouseButton, MouseMode, ScaleMode, Window, WindowOp
 use std::collections::{BTreeMap, HashMap};
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 pub const WIDTH: usize = 800;
 pub const HEIGHT: usize = 600;
@@ -20,6 +21,9 @@ pub struct Layer {
     pub x: i32,
     pub y: i32,
     pub opacity: u8,
+    pub additive_color: [u8; 3],
+    pub source_rect: Option<[u32; 4]>,
+    pub sepia_filter: bool,
     pub visible: bool,
 }
 
@@ -35,6 +39,7 @@ pub struct Scene {
     pub dialogue_visible: bool,
     pub status: String,
     pub finished: bool,
+    pub choices: Vec<String>,
 }
 
 impl Default for Scene {
@@ -50,6 +55,7 @@ impl Default for Scene {
             dialogue_visible: true,
             status: String::new(),
             finished: false,
+            choices: Vec::new(),
         }
     }
 }
@@ -85,6 +91,10 @@ impl Renderer {
     }
 
     pub fn render(&mut self, scene: &Scene, hide_dialogue: bool) -> &[u32] {
+        self.render_selected(scene, hide_dialogue, 0)
+    }
+
+    fn render_selected(&mut self, scene: &Scene, hide_dialogue: bool, selected: usize) -> &[u32] {
         self.pixels.fill(0);
         composite_layers(&mut self.pixels, &scene.layers);
         if let Some(layers) = &scene.transition_from {
@@ -103,6 +113,9 @@ impl Renderer {
         }
         if !hide_dialogue {
             self.footer(scene);
+        }
+        if !scene.choices.is_empty() {
+            self.choice_menu(&scene.choices, selected);
         }
         &self.pixels
     }
@@ -209,6 +222,53 @@ impl Renderer {
         self.text("Esc 退出", 644, 373, 16, 0xa6b6c5);
     }
 
+    fn menu(&mut self, title: &str, items: &[MenuItem], selected: usize) {
+        self.rect(0, 0, WIDTH, HEIGHT, 0x06101e, 150);
+        let top = menu_top(items.len());
+        self.rect(125, top - 52, 550, items.len() * 48 + 66, 0x111e30, 244);
+        self.text(title, 149, top - 42, 25, 0xf7e4b8);
+        for (index, item) in items.iter().enumerate() {
+            let row = top + index as i32 * 48;
+            let (fill, ink) = match (item.enabled, selected == index) {
+                (false, _) => (0x172236, 0x788598),
+                (true, true) => (0x365970, 0xffffff),
+                (true, false) => (0x1c3048, 0xe0e9ef),
+            };
+            self.rect(139, row, 522, 43, fill, 255);
+            let label = self.ellipsize(&item.label, 22, 480.0);
+            self.text(&label, 159, row + 6, 22, ink);
+        }
+        self.rect(0, 575, WIDTH, 25, 0x08111b, 245);
+        self.text(
+            "方向键选择 · Enter / 点击确认 · Esc 返回",
+            18,
+            578,
+            15,
+            0xe0e9ef,
+        );
+    }
+
+    fn choice_menu(&mut self, choices: &[String], selected: usize) {
+        let items: Vec<_> = choices
+            .iter()
+            .map(|label| MenuItem {
+                label: label.clone(),
+                enabled: true,
+                action: MenuAction::Resume,
+            })
+            .collect();
+        self.menu("请选择", &items, selected);
+    }
+
+    fn notice(&mut self, message: &str) {
+        let lines = self.wrap(message, 17, 700.0);
+        let height = (lines.len().min(5) * 22 + 20).max(44);
+        self.rect(35, 12, 730, height, 0x101c2c, 250);
+        for (index, line) in lines.iter().take(5).enumerate() {
+            self.text(line, 50, 20 + index as i32 * 22, 17, 0xf7e4b8);
+        }
+    }
+
     fn rect(&mut self, x: i32, y: i32, width: usize, height: usize, color: u32, alpha: u8) {
         let left = x.max(0) as usize;
         let top = y.max(0) as usize;
@@ -310,8 +370,25 @@ fn composite_layers(frame: &mut [u32], layers: &BTreeMap<i32, Layer>) {
         .values()
         .filter(|layer| layer.visible && layer.opacity > 0)
     {
-        let source_width = i64::from(layer.image.width());
-        let source_height = i64::from(layer.image.height());
+        if layer.sepia_filter {
+            for pixel in frame.iter_mut() {
+                let luminance = f64::from((*pixel >> 16) & 255) * 0.299
+                    + f64::from((*pixel >> 8) & 255) * 0.587
+                    + f64::from(*pixel & 255) * 0.114;
+                let red = (luminance + 20.02056).clamp(0.0, 255.0) as u32;
+                let green = (luminance - 2.2134).clamp(0.0, 255.0) as u32;
+                let blue = (luminance - 41.11926).clamp(0.0, 255.0) as u32;
+                *pixel = (red << 16) | (green << 8) | blue;
+            }
+            continue;
+        }
+        let rect = layer
+            .source_rect
+            .unwrap_or([0, 0, layer.image.width(), layer.image.height()]);
+        let source_left = rect[0].min(layer.image.width());
+        let source_top = rect[1].min(layer.image.height());
+        let source_width = i64::from(rect[2].min(layer.image.width() - source_left));
+        let source_height = i64::from(rect[3].min(layer.image.height() - source_top));
         let x = i64::from(layer.x);
         let y = i64::from(layer.y);
         let left = (-x).clamp(0, source_width);
@@ -320,15 +397,488 @@ fn composite_layers(frame: &mut [u32], layers: &BTreeMap<i32, Layer>) {
         let bottom = (HEIGHT as i64 - y).clamp(0, source_height);
         for source_y in top..bottom {
             for source_x in left..right {
-                let rgba = layer.image.get_pixel(source_x as u32, source_y as u32).0;
+                let rgba = layer
+                    .image
+                    .get_pixel(source_left + source_x as u32, source_top + source_y as u32)
+                    .0;
                 let alpha = ((u16::from(rgba[3]) * u16::from(layer.opacity) + 127) / 255) as u8;
-                let foreground =
-                    (u32::from(rgba[0]) << 16) | (u32::from(rgba[1]) << 8) | u32::from(rgba[2]);
+                let foreground = (u32::from(rgba[0].saturating_add(layer.additive_color[0])) << 16)
+                    | (u32::from(rgba[1].saturating_add(layer.additive_color[1])) << 8)
+                    | u32::from(rgba[2].saturating_add(layer.additive_color[2]));
                 let pixel = &mut frame[(source_y + y) as usize * WIDTH + (source_x + x) as usize];
                 *pixel = blend(*pixel, foreground, alpha);
             }
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Screen {
+    Title,
+    Playing,
+    Paused,
+    SaveSlots,
+    LoadSlots,
+}
+
+#[derive(Clone, Copy)]
+enum MenuAction {
+    NewGame,
+    Continue,
+    Resume,
+    QuickSave,
+    QuickLoad,
+    AutoLoad,
+    SaveMenu,
+    LoadMenu,
+    SaveSlot(usize),
+    LoadSlot(usize),
+    Title,
+    Back,
+    Quit,
+}
+
+struct MenuItem {
+    label: String,
+    enabled: bool,
+    action: MenuAction,
+}
+
+impl MenuItem {
+    fn new(label: &str, enabled: bool, action: MenuAction) -> Self {
+        Self {
+            label: label.into(),
+            enabled,
+            action,
+        }
+    }
+}
+
+struct PlayUi {
+    screen: Screen,
+    parent: Screen,
+    selected: usize,
+    choice_selected: usize,
+    hide_dialogue: bool,
+    notice: Option<(String, Instant)>,
+    failure: Option<String>,
+}
+
+impl PlayUi {
+    fn enter(&mut self, screen: Screen) {
+        self.screen = screen;
+        self.selected = 0;
+        self.hide_dialogue = false;
+    }
+
+    fn inform(&mut self, message: impl Into<String>) {
+        self.notice = Some((message.into(), Instant::now()));
+    }
+
+    fn items(&self, runtime: &crate::runtime::Runtime, directory: &Path) -> Vec<MenuItem> {
+        let can_save = self.failure.is_none() && runtime.can_save();
+        let quick = directory.join("quick.json").is_file();
+        match self.screen {
+            Screen::Title => vec![
+                MenuItem::new("开始游戏", true, MenuAction::NewGame),
+                MenuItem::new(
+                    "继续上次存档",
+                    latest_save(directory).is_some(),
+                    MenuAction::Continue,
+                ),
+                MenuItem::new("读取存档", true, MenuAction::LoadMenu),
+                MenuItem::new("退出", true, MenuAction::Quit),
+            ],
+            Screen::Paused => vec![
+                MenuItem::new(
+                    "继续游戏",
+                    self.failure.is_none() && !runtime.scene.finished,
+                    MenuAction::Resume,
+                ),
+                MenuItem::new("快速存档  F5", can_save, MenuAction::QuickSave),
+                MenuItem::new("读取快速存档  F9", quick, MenuAction::QuickLoad),
+                MenuItem::new("保存到存档槽", can_save, MenuAction::SaveMenu),
+                MenuItem::new("读取存档", true, MenuAction::LoadMenu),
+                MenuItem::new("返回标题", true, MenuAction::Title),
+                MenuItem::new("退出", true, MenuAction::Quit),
+            ],
+            Screen::SaveSlots | Screen::LoadSlots => {
+                let saving = self.screen == Screen::SaveSlots;
+                let mut items = Vec::new();
+                if !saving {
+                    items.push(MenuItem::new(
+                        "读取自动存档",
+                        directory.join("auto.json").is_file(),
+                        MenuAction::AutoLoad,
+                    ));
+                }
+                for slot in 1..=3 {
+                    let exists = directory.join(format!("slot{slot}.json")).is_file();
+                    let state = if exists { "已有存档" } else { "空槽" };
+                    items.push(MenuItem {
+                        label: format!("存档 {slot} · {state}"),
+                        enabled: if saving { can_save } else { exists },
+                        action: if saving {
+                            MenuAction::SaveSlot(slot)
+                        } else {
+                            MenuAction::LoadSlot(slot)
+                        },
+                    });
+                }
+                items.push(MenuItem::new("返回", true, MenuAction::Back));
+                items
+            }
+            Screen::Playing => Vec::new(),
+        }
+    }
+
+    fn execute(
+        &mut self,
+        action: MenuAction,
+        runtime: &mut crate::runtime::Runtime,
+        directory: &Path,
+    ) -> Result<bool> {
+        match action {
+            MenuAction::NewGame => {
+                runtime.restart()?;
+                self.failure = None;
+                self.choice_selected = 0;
+                self.enter(Screen::Playing);
+                runtime.set_paused(false);
+            }
+            MenuAction::Resume => {
+                self.enter(Screen::Playing);
+                runtime.set_paused(false);
+            }
+            MenuAction::QuickSave | MenuAction::SaveSlot(_) => {
+                let filename = match action {
+                    MenuAction::SaveSlot(slot) => format!("slot{slot}.json"),
+                    _ => "quick.json".into(),
+                };
+                runtime.save(&directory.join(filename))?;
+                self.inform("存档已保存");
+                if self.screen == Screen::SaveSlots {
+                    self.enter(Screen::Paused);
+                }
+            }
+            MenuAction::Continue => {
+                let path = latest_save(directory).ok_or("没有可读取的存档")?;
+                runtime.load(&path)?;
+                self.failure = None;
+                self.choice_selected = 0;
+                self.enter(Screen::Playing);
+                runtime.set_paused(false);
+                self.inform("存档已读取");
+            }
+            MenuAction::QuickLoad | MenuAction::AutoLoad | MenuAction::LoadSlot(_) => {
+                let filename = match action {
+                    MenuAction::LoadSlot(slot) => format!("slot{slot}.json"),
+                    MenuAction::AutoLoad => "auto.json".into(),
+                    _ => "quick.json".into(),
+                };
+                runtime.load(&directory.join(filename))?;
+                self.failure = None;
+                self.choice_selected = 0;
+                self.enter(Screen::Playing);
+                runtime.set_paused(false);
+                self.inform("存档已读取");
+            }
+            MenuAction::SaveMenu => {
+                self.parent = self.screen;
+                self.enter(Screen::SaveSlots);
+            }
+            MenuAction::LoadMenu => {
+                self.parent = self.screen;
+                self.enter(Screen::LoadSlots);
+            }
+            MenuAction::Title => {
+                runtime.set_paused(true);
+                self.enter(Screen::Title);
+            }
+            MenuAction::Back => self.enter(self.parent),
+            MenuAction::Quit => return Ok(true),
+        }
+        Ok(false)
+    }
+
+    fn playback_error(&mut self, runtime: &mut crate::runtime::Runtime, error: impl ToString) {
+        let message = error.to_string();
+        self.failure = Some(message.clone());
+        self.inform(message);
+        runtime.set_paused(true);
+        self.enter(Screen::Paused);
+    }
+}
+
+fn menu_top(count: usize) -> i32 {
+    ((HEIGHT as i32 - count as i32 * 48) / 2 + 80).max(65)
+}
+
+fn latest_save(directory: &Path) -> Option<PathBuf> {
+    [
+        "quick.json",
+        "auto.json",
+        "slot1.json",
+        "slot2.json",
+        "slot3.json",
+    ]
+    .into_iter()
+    .filter_map(|name| {
+        let path = directory.join(name);
+        let metadata = std::fs::metadata(&path).ok()?;
+        metadata
+            .is_file()
+            .then_some((metadata.modified().ok()?, path))
+    })
+    .max_by_key(|(modified, _)| *modified)
+    .map(|(_, path)| path)
+}
+
+fn menu_hit(position: Option<(f32, f32)>, count: usize) -> Option<usize> {
+    let (x, y) = position?;
+    if !(139.0..661.0).contains(&x) {
+        return None;
+    }
+    let relative_y = y - menu_top(count) as f32;
+    if relative_y < 0.0 {
+        return None;
+    }
+    let index = (relative_y / 48.0) as usize;
+    (index < count && relative_y % 48.0 < 43.0).then_some(index)
+}
+
+fn framebuffer_position(position: Option<(f32, f32)>, size: (usize, usize)) -> Option<(f32, f32)> {
+    let (x, y) = position?;
+    let scale = (size.0 as f32 / WIDTH as f32).min(size.1 as f32 / HEIGHT as f32);
+    if scale <= 0.0 {
+        return None;
+    }
+    let left = (size.0 as f32 - WIDTH as f32 * scale) / 2.0;
+    let top = (size.1 as f32 - HEIGHT as f32 * scale) / 2.0;
+    let point = ((x - left) / scale, (y - top) / scale);
+    ((0.0..WIDTH as f32).contains(&point.0) && (0.0..HEIGHT as f32).contains(&point.1))
+        .then_some(point)
+}
+
+/// Interactive player with title, pause, choices and independent Rust-format save slots.
+pub fn play(
+    runtime: &mut crate::runtime::Runtime,
+    font_path: &Path,
+    save_dir: &Path,
+) -> Result<()> {
+    let mut renderer = Renderer::new(std::fs::read(font_path)?)?;
+    runtime.set_paused(true);
+    let title_scene = runtime.title_scene()?;
+    let mut window = Window::new(
+        "Yuka RS",
+        WIDTH,
+        HEIGHT,
+        WindowOptions {
+            resize: true,
+            scale_mode: ScaleMode::AspectRatioStretch,
+            ..WindowOptions::default()
+        },
+    )?;
+    window.set_target_fps(60);
+    window.set_background_color(8, 12, 18);
+    let mut ui = PlayUi {
+        screen: Screen::Title,
+        parent: Screen::Title,
+        selected: 0,
+        choice_selected: 0,
+        hide_dialogue: false,
+        notice: None,
+        failure: None,
+    };
+    let mut mouse_was_down = false;
+    let mut previous_position = None;
+    let mut dirty = true;
+
+    while window.is_open() {
+        let active = window.is_active();
+        let position = framebuffer_position(
+            window.get_unscaled_mouse_pos(MouseMode::Discard),
+            window.get_size(),
+        );
+        let mouse_down = window.get_mouse_down(MouseButton::Left);
+        let click = active && mouse_down && !mouse_was_down;
+        mouse_was_down = mouse_down;
+        let moved = position != previous_position;
+        previous_position = position;
+        let confirm = active
+            && (window.is_key_pressed(Key::Enter, KeyRepeat::No)
+                || window.is_key_pressed(Key::Space, KeyRepeat::No));
+        let escape = active && window.is_key_pressed(Key::Escape, KeyRepeat::No);
+        let up = active && window.is_key_pressed(Key::Up, KeyRepeat::Yes);
+        let down = active && window.is_key_pressed(Key::Down, KeyRepeat::Yes);
+        let quick_save = active && window.is_key_pressed(Key::F5, KeyRepeat::No);
+        let quick_load = active && window.is_key_pressed(Key::F9, KeyRepeat::No);
+
+        if ui
+            .notice
+            .as_ref()
+            .is_some_and(|(_, time)| time.elapsed() >= Duration::from_secs(8))
+        {
+            ui.notice = None;
+            dirty = true;
+        }
+        if escape {
+            match ui.screen {
+                Screen::Playing => {
+                    runtime.set_paused(true);
+                    ui.enter(Screen::Paused);
+                }
+                Screen::Paused if ui.failure.is_none() && !runtime.scene.finished => {
+                    ui.execute(MenuAction::Resume, runtime, save_dir)?;
+                }
+                Screen::SaveSlots | Screen::LoadSlots => ui.enter(ui.parent),
+                _ => {}
+            }
+            dirty = true;
+        } else if quick_save || quick_load {
+            let action = if quick_save {
+                MenuAction::QuickSave
+            } else {
+                MenuAction::QuickLoad
+            };
+            if quick_save
+                && (ui.screen == Screen::Title
+                    || (ui.screen == Screen::LoadSlots && ui.parent == Screen::Title)
+                    || !runtime.can_save()
+                    || ui.failure.is_some())
+            {
+                ui.inform("请在对白或选择支停顿时存档");
+            } else if let Err(error) = ui.execute(action, runtime, save_dir) {
+                ui.inform(format!("存读档失败 · {error}"));
+            }
+            dirty = true;
+        } else if ui.screen == Screen::Playing {
+            if active && window.is_key_pressed(Key::H, KeyRepeat::No) {
+                ui.hide_dialogue = !ui.hide_dialogue;
+                dirty = true;
+            }
+            let count = runtime.choices().len();
+            if count > 0 {
+                ui.choice_selected = ui.choice_selected.min(count - 1);
+                if up {
+                    ui.choice_selected = (ui.choice_selected + count - 1) % count;
+                    dirty = true;
+                }
+                if down {
+                    ui.choice_selected = (ui.choice_selected + 1) % count;
+                    dirty = true;
+                }
+                let hovered = menu_hit(position, count);
+                if active
+                    && moved
+                    && let Some(index) = hovered
+                {
+                    ui.choice_selected = index;
+                    dirty = true;
+                }
+                if confirm || (click && hovered.is_some()) {
+                    if click && let Some(index) = hovered {
+                        ui.choice_selected = index;
+                    }
+                    if let Err(error) = runtime.choose(ui.choice_selected) {
+                        ui.playback_error(runtime, error);
+                    }
+                    ui.choice_selected = 0;
+                    dirty = true;
+                }
+            } else if confirm || (click && position.is_some()) {
+                if ui.hide_dialogue {
+                    ui.hide_dialogue = false;
+                } else if let Err(error) = runtime.advance() {
+                    ui.playback_error(runtime, error);
+                }
+                dirty = true;
+            }
+        } else if active && (up || down || moved || confirm || click) {
+            let items = ui.items(runtime, save_dir);
+            let count = items.len();
+            if up {
+                ui.selected = (ui.selected + count - 1) % count;
+                dirty = true;
+            }
+            if down {
+                ui.selected = (ui.selected + 1) % count;
+                dirty = true;
+            }
+            let hovered = menu_hit(position, count);
+            if active
+                && moved
+                && let Some(index) = hovered
+            {
+                ui.selected = index;
+                dirty = true;
+            }
+            if confirm || (click && hovered.is_some()) {
+                if click && let Some(index) = hovered {
+                    ui.selected = index;
+                }
+                if items[ui.selected].enabled {
+                    match ui.execute(items[ui.selected].action, runtime, save_dir) {
+                        Ok(true) => break,
+                        Ok(false) => {}
+                        Err(error) => ui.inform(format!("操作失败 · {error}")),
+                    }
+                }
+                dirty = true;
+            }
+        }
+        if ui.screen == Screen::Playing && ui.failure.is_none() {
+            match runtime.tick() {
+                Ok(changed) => dirty |= changed,
+                Err(error) => {
+                    ui.playback_error(runtime, error);
+                    dirty = true;
+                }
+            }
+        }
+        if dirty {
+            if ui.screen == Screen::Title
+                || (ui.screen == Screen::LoadSlots && ui.parent == Screen::Title)
+            {
+                renderer.render(&title_scene, true);
+            } else {
+                renderer.render_selected(&runtime.scene, ui.hide_dialogue, ui.choice_selected);
+            }
+            if ui.screen == Screen::Playing {
+                if runtime.choices().is_empty() && !ui.hide_dialogue {
+                    renderer.rect(0, 575, WIDTH, 25, 0x08111b, 255);
+                    renderer.text(
+                        "点击 / 空格继续 · H 隐藏 · Esc 菜单 · F5 存档 · F9 读档",
+                        12,
+                        579,
+                        13,
+                        0xe0e9ef,
+                    );
+                    let status = renderer.ellipsize(&runtime.scene.status, 13, 245.0);
+                    let width = renderer.text_width(&status, 13);
+                    renderer.text(&status, (788.0 - width) as i32, 579, 13, 0xa6b6c5);
+                }
+            } else {
+                let title = match ui.screen {
+                    Screen::Title => "Yuka RS",
+                    Screen::Paused => "游戏已暂停",
+                    Screen::SaveSlots => "保存游戏",
+                    _ => "读取存档",
+                };
+                renderer.menu(title, &ui.items(runtime, save_dir), ui.selected);
+            }
+            if let Some((message, _)) = &ui.notice {
+                renderer.notice(message);
+            }
+            dirty = false;
+        }
+        window.update_with_buffer(renderer.pixels(), WIDTH, HEIGHT)?;
+    }
+    runtime.set_paused(true);
+    if let Some(error) = ui.failure {
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 /// The runtime should be initialized to its first yield before entering the window loop.
@@ -402,6 +952,106 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pointer_mapping_preserves_letterboxed_menu_coordinates() {
+        assert_eq!(
+            framebuffer_position(Some((200.0, 200.0)), (800, 800)),
+            Some((200.0, 100.0))
+        );
+        assert_eq!(framebuffer_position(Some((200.0, 50.0)), (800, 800)), None);
+        assert_eq!(
+            framebuffer_position(Some((600.0, 300.0)), (1200, 600)),
+            Some((400.0, 300.0))
+        );
+        assert_eq!(framebuffer_position(Some((5.0, 5.0)), (0, 0)), None);
+        let top = menu_top(4) as f32;
+        assert_eq!(menu_hit(Some((150.0, top + 50.0)), 4), Some(1));
+        assert_eq!(menu_hit(Some((150.0, top + 45.0)), 4), None);
+        assert_eq!(menu_hit(Some((120.0, top)), 4), None);
+    }
+
+    #[test]
+    fn entering_menu_resets_selection_and_hidden_dialogue() {
+        let mut ui = PlayUi {
+            screen: Screen::Playing,
+            parent: Screen::Title,
+            selected: 4,
+            choice_selected: 1,
+            hide_dialogue: true,
+            notice: None,
+            failure: None,
+        };
+        ui.enter(Screen::Paused);
+        assert!(ui.screen == Screen::Paused);
+        assert_eq!(ui.selected, 0);
+        assert!(!ui.hide_dialogue);
+        assert_eq!(ui.choice_selected, 1);
+    }
+
+    #[test]
+    fn sepia_filter_affects_only_preceding_layers() {
+        let image = Arc::new(RgbaImage::from_pixel(1, 1, image::Rgba([0, 255, 0, 255])));
+        let layers = BTreeMap::from([
+            (
+                10,
+                Layer {
+                    image: image.clone(),
+                    x: 0,
+                    y: 0,
+                    opacity: 255,
+                    additive_color: [0; 3],
+                    source_rect: None,
+                    sepia_filter: true,
+                    visible: true,
+                },
+            ),
+            (
+                11,
+                Layer {
+                    image,
+                    x: 0,
+                    y: 0,
+                    opacity: 255,
+                    additive_color: [0; 3],
+                    source_rect: None,
+                    sepia_filter: false,
+                    visible: true,
+                },
+            ),
+        ]);
+        let mut frame = vec![0xffffff; WIDTH * HEIGHT];
+        composite_layers(&mut frame, &layers);
+        assert_eq!(frame[0], 0x00ff00);
+        assert_eq!(frame[1], 0xfffcd5);
+    }
+
+    #[test]
+    fn sprite_rect_and_additive_color_preserve_alpha_and_bounds() {
+        let mut image = RgbaImage::from_pixel(3, 2, image::Rgba([10, 20, 30, 255]));
+        image.put_pixel(1, 1, image::Rgba([200, 100, 50, 128]));
+        let mut layers = BTreeMap::from([(
+            5,
+            Layer {
+                image: Arc::new(image),
+                x: 0,
+                y: 0,
+                opacity: 255,
+                additive_color: [100, 20, 0],
+                source_rect: Some([1, 1, 1, 1]),
+                sepia_filter: false,
+                visible: true,
+            },
+        )]);
+        let mut frame = vec![0; WIDTH * HEIGHT];
+        composite_layers(&mut frame, &layers);
+        assert_eq!(frame[0], 0x803c19);
+        assert_eq!(frame[1], 0);
+        layers.get_mut(&5).unwrap().source_rect = Some([u32::MAX, u32::MAX, u32::MAX, u32::MAX]);
+        frame.fill(0);
+        composite_layers(&mut frame, &layers);
+        assert!(frame.iter().all(|&pixel| pixel == 0));
+    }
+
+    #[test]
     fn composites_alpha_and_clips_negative_positions() {
         let mut frame = vec![0x0000ff; WIDTH * HEIGHT];
         let image = Arc::new(RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 128])));
@@ -412,6 +1062,9 @@ mod tests {
                 x: -1,
                 y: -1,
                 opacity: 255,
+                additive_color: [0; 3],
+                source_rect: None,
+                sepia_filter: false,
                 visible: true,
             },
         )]);
@@ -433,6 +1086,9 @@ mod tests {
                     x: 0,
                     y: 0,
                     opacity: 255,
+                    additive_color: [0; 3],
+                    source_rect: None,
+                    sepia_filter: false,
                     visible: true,
                 },
             ),
@@ -443,6 +1099,9 @@ mod tests {
                     x: 0,
                     y: 0,
                     opacity: 255,
+                    additive_color: [0; 3],
+                    source_rect: None,
+                    sepia_filter: false,
                     visible: true,
                 },
             ),

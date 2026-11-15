@@ -2,11 +2,11 @@
 //! Unimplemented expressions and control flow return errors without being skipped.
 use crate::Result;
 use crate::script::{Element, InstructionKind, Script, Text};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum Value {
     Integer(i32),
@@ -14,7 +14,7 @@ pub enum Value {
     Label { name: String, link: i32 },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Slot {
     IntegerVariable { bank: String, id: i32 },
@@ -24,7 +24,7 @@ pub enum Slot {
     SpecialString { name: String },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     Target {
@@ -85,6 +85,121 @@ struct Frame {
     return_target: Option<Slot>,
 }
 
+/// Serializable execution state. Script content is resolved from game resources.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VmCheckpoint {
+    version: u32,
+    script: String,
+    script_fingerprint: String,
+    pc: u32,
+    memory: Vec<(Slot, Value)>,
+    target: Option<Slot>,
+    awaiting_return: bool,
+    pending_call: Option<(Event, u32)>,
+    frames: Vec<FrameCheckpoint>,
+    default_banks: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectionOption {
+    pub label: String,
+    pub branch_pc: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FrameCheckpoint {
+    script: String,
+    script_fingerprint: String,
+    return_pc: u32,
+    memory: Vec<(Slot, Value)>,
+    return_target: Option<Slot>,
+}
+
+/// Stable FNV-1a content identifier used to reject saves for changed scripts.
+pub fn script_fingerprint(script: &Script) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    let mut feed = |bytes: &[u8]| {
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    };
+    feed(b"yuka-script-v1");
+    feed(&[match script.encoding {
+        crate::script::TextEncoding::ShiftJis => 0,
+        crate::script::TextEncoding::Gbk => 1,
+        crate::script::TextEncoding::Utf8 => 2,
+    }]);
+    feed(&script.header.max_locals.to_le_bytes());
+    feed(&(script.code.len() as u64).to_le_bytes());
+    for word in &script.code {
+        feed(&word.to_le_bytes());
+    }
+    feed(&(script.entries.len() as u64).to_le_bytes());
+    for entry in &script.entries {
+        feed(&entry.kind.to_le_bytes());
+        for word in entry.fields {
+            feed(&word.to_le_bytes());
+        }
+    }
+    feed(&(script.data.len() as u64).to_le_bytes());
+    feed(&script.data);
+    format!("{hash:016x}")
+}
+
+fn restore_memory(
+    entries: Vec<(Slot, Value)>,
+    script: &Script,
+    locals_only: bool,
+) -> Result<BTreeMap<Slot, Value>> {
+    let mut memory = BTreeMap::new();
+    for (slot, value) in entries {
+        validate_saved_slot(&slot, script)?;
+        Vm::validate_assignment(&slot, &value)?;
+        if locals_only && !frame_local(&slot) {
+            return Err("saved local frame contains shared variables".into());
+        }
+        if memory.insert(slot, value).is_some() {
+            return Err("saved memory contains duplicate slots".into());
+        }
+    }
+    Ok(memory)
+}
+
+fn validate_saved_slot(slot: &Slot, script: &Script) -> Result<()> {
+    match slot {
+        Slot::Local { id } if *id >= script.header.max_locals => {
+            Err("saved local ID exceeds MaxLocals".into())
+        }
+        Slot::DataWord { offset }
+            if (*offset as usize)
+                .checked_add(4)
+                .is_none_or(|end| end > script.data.len()) =>
+        {
+            Err("saved data word is outside the script".into())
+        }
+        Slot::IntegerVariable { id, .. } | Slot::StringVariable { id, .. } if *id < 0 => {
+            Err("saved variable ID is negative".into())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn load_saved_script(
+    name: &str,
+    expected: &str,
+    load: &mut impl FnMut(&str) -> Result<Arc<Script>>,
+) -> Result<Arc<Script>> {
+    let script = load(name)?;
+    if script_fingerprint(&script) != expected {
+        return Err(format!("saved script content differs from current resource: {name}").into());
+    }
+    script.disassemble()?;
+    Ok(script)
+}
+
 fn frame_local(slot: &Slot) -> bool {
     matches!(slot, Slot::Local { .. } | Slot::DataWord { .. })
 }
@@ -113,6 +228,126 @@ impl Vm {
 
     pub fn current_script(&self) -> &Arc<Script> {
         &self.script
+    }
+
+    pub fn pending_host_call(&self) -> Option<&Event> {
+        self.pending_call.as_ref().map(|(event, _)| event)
+    }
+
+    /// Resolve each script to a game-resource name, without embedding game data.
+    pub fn checkpoint(
+        &self,
+        resolve: impl Fn(&Arc<Script>) -> Result<String>,
+    ) -> Result<VmCheckpoint> {
+        let frames = self
+            .frames
+            .iter()
+            .map(|frame| {
+                Ok(FrameCheckpoint {
+                    script: resolve(&frame.script)?,
+                    script_fingerprint: script_fingerprint(&frame.script),
+                    return_pc: frame.return_pc,
+                    memory: frame
+                        .memory
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
+                    return_target: frame.return_target.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(VmCheckpoint {
+            version: 1,
+            script: resolve(&self.script)?,
+            script_fingerprint: script_fingerprint(&self.script),
+            pc: self.pc,
+            memory: self
+                .memory
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            target: self.target.clone(),
+            awaiting_return: self.awaiting_return,
+            pending_call: self.pending_call.clone(),
+            frames,
+            default_banks: self.default_banks,
+        })
+    }
+
+    /// Build and validate a new VM. A failed restore leaves the caller's VM intact.
+    pub fn restore(
+        checkpoint: VmCheckpoint,
+        mut load: impl FnMut(&str) -> Result<Arc<Script>>,
+    ) -> Result<Self> {
+        if checkpoint.version != 1 {
+            return Err("unsupported VM checkpoint version".into());
+        }
+        let script = load_saved_script(
+            &checkpoint.script,
+            &checkpoint.script_fingerprint,
+            &mut load,
+        )?;
+        let memory = restore_memory(checkpoint.memory, &script, false)?;
+        if let Some(slot) = &checkpoint.target {
+            validate_saved_slot(slot, &script)?;
+        }
+        if checkpoint.awaiting_return && checkpoint.target.is_none() {
+            return Err("saved return assignment has no target".into());
+        }
+        let mut frames = Vec::new();
+        for saved in checkpoint.frames {
+            let script = load_saved_script(&saved.script, &saved.script_fingerprint, &mut load)?;
+            let memory = restore_memory(saved.memory, &script, true)?;
+            if let Some(slot) = &saved.return_target {
+                validate_saved_slot(slot, &script)?;
+            }
+            let caller = Self::new_owned(Arc::clone(&script));
+            caller.validate_boundary(saved.return_pc)?;
+            let mut word = 0;
+            let mut valid_return = false;
+            while word < saved.return_pc {
+                let (instruction, next) = script.instruction_at(word)?;
+                valid_return = next == saved.return_pc
+                    && matches!(&script.entry(instruction.entry_index)?.element,
+                        Element::Function { name } if name.text == "ScriptCall")
+                    && matches!(instruction.kind, InstructionKind::Call { arguments }
+                        if arguments.len() == 1 && matches!(script.entry(arguments[0])?.element, Element::Control { .. }));
+                word = next;
+            }
+            if !valid_return {
+                return Err("saved frame return PC does not follow a local ScriptCall".into());
+            }
+            frames.push(Frame {
+                script,
+                return_pc: saved.return_pc,
+                memory,
+                return_target: saved.return_target,
+            });
+        }
+        let mut vm = Self {
+            script,
+            pc: checkpoint.pc,
+            memory,
+            target: checkpoint.target,
+            awaiting_return: checkpoint.awaiting_return,
+            pending_call: None,
+            frames,
+            default_banks: checkpoint.default_banks,
+        };
+        vm.validate_boundary(vm.pc)?;
+        if vm.pc as usize == vm.script.code.len() && vm.target.is_some() {
+            return Err("saved script ended with an incomplete assignment".into());
+        }
+        if let Some((event, next)) = checkpoint.pending_call {
+            if !matches!(event, Event::HostCall { .. }) {
+                return Err("saved pending event is not a host call".into());
+            }
+            let actual = vm.step()?;
+            if actual != event || vm.pending_call.as_ref().map(|(_, word)| *word) != Some(next) {
+                return Err("saved pending host call differs from script state".into());
+            }
+        }
+        Ok(vm)
     }
 
     /// Opt into the zero/empty initial state of the four standard engine banks.
@@ -655,6 +890,7 @@ impl Vm {
                 | "Exit"
                 | "ScriptExit"
                 | "Restart"
+                | "Select"
                 | "Case"
                 | "Case2"
                 | "MouseCase"
@@ -677,6 +913,84 @@ impl Vm {
             );
         }
         self.complete_pending(value)
+    }
+
+    /// Read the direct Case children of a suspended Select's following block.
+    /// Case geometry remains a host concern. The VM preserves each branch PC.
+    pub fn selection_options(&self) -> Result<Vec<SelectionOption>> {
+        let (Event::HostCall { function, .. }, next) = self
+            .pending_call
+            .as_ref()
+            .ok_or("no selection is pending")?
+        else {
+            return Err("pending event is not a host call".into());
+        };
+        if function != "Select" || self.target.is_some() {
+            return Err("pending call is not a standalone Select".into());
+        }
+        let end = self.block_link(*next)?;
+        let (closing, _) = self.script.instruction_at(end)?;
+        if !matches!(&self.script.entry(closing.entry_index)?.element, Element::Control { name, .. } if name.text == "}")
+        {
+            return Err("Select block has no matching closing brace".into());
+        }
+        let mut options = Vec::new();
+        let mut depth = 0usize;
+        let mut word = *next;
+        while word < end {
+            let (instruction, next_word) = self.script.instruction_at(word)?;
+            let entry = self.script.entry(instruction.entry_index)?;
+            match (&entry.element, instruction.kind) {
+                (Element::Control { name, .. }, _) if name.text == "{" => depth += 1,
+                (Element::Control { name, .. }, _) if name.text == "}" => {
+                    depth = depth.checked_sub(1).ok_or("unbalanced Select block")?;
+                    if depth == 0 {
+                        return Err("Select block closes before its linked end".into());
+                    }
+                }
+                (Element::Function { name }, InstructionKind::Call { arguments })
+                    if name.text == "Case" && depth == 1 =>
+                {
+                    let first = *arguments.first().ok_or("Case has no option text")?;
+                    let Value::String(label) = self.value(first)? else {
+                        return Err("Case option text is not a string".into());
+                    };
+                    let branch_end = self.block_link(next_word)?;
+                    let (branch_close, _) = self.script.instruction_at(branch_end)?;
+                    if branch_end <= next_word
+                        || branch_end >= end
+                        || !matches!(
+                            &self.script.entry(branch_close.entry_index)?.element,
+                            Element::Control { name, .. } if name.text == "}"
+                        )
+                    {
+                        return Err("Case body extends outside Select block".into());
+                    }
+                    options.push(SelectionOption {
+                        label: label.text,
+                        branch_pc: next_word,
+                    });
+                }
+                _ => {}
+            }
+            word = next_word;
+        }
+        if depth != 1 || options.is_empty() {
+            return Err("Select has no valid Case options or unbalanced braces".into());
+        }
+        Ok(options)
+    }
+
+    /// Continue at the selected Case's opening brace, matching the native Select handler.
+    pub fn resume_selection(&mut self, index: usize) -> Result<()> {
+        let options = self.selection_options()?;
+        let selected = options
+            .get(index)
+            .ok_or("selection index is out of range")?;
+        self.pc = selected.branch_pc;
+        self.pending_call = None;
+        self.awaiting_return = false;
+        Ok(())
     }
 
     /// The scheduler calls this only after a string-named ScriptCall child has
@@ -1148,7 +1462,8 @@ mod tests {
             },
         });
         script.code = vec![0, 1, 0, 3, 1, path];
-        let mut vm = Vm::new_owned(Arc::new(script));
+        let script = Arc::new(script);
+        let mut vm = Vm::new_owned(Arc::clone(&script));
         vm.initialize_default_banks();
         assert!(matches!(vm.value(0).unwrap(), Value::Integer(0)));
         vm.set_variable(Slot::DataWord { offset: 4 }, Value::Integer(99))
@@ -1156,6 +1471,7 @@ mod tests {
         vm.step().unwrap();
         vm.step().unwrap();
         assert!(matches!(vm.step().unwrap(), Event::HostCall { .. }));
+        vm = checkpoint_round_trip(&vm, &[("caller.yks", Arc::clone(&script))]);
         assert!(vm.resume_script_call(None).is_err());
         assert_eq!(vm.pc, 3);
         let mut child_memory = vm.shared_memory();
@@ -1211,14 +1527,23 @@ mod tests {
         caller.code = vec![3, 1, sub, return_function, 0, sub, jump, 1, path];
         let mut replacement = script();
         replacement.code = vec![0, 1, 1, 2];
-        let mut vm = Vm::new(&caller);
+        let caller = Arc::new(caller);
+        let replacement = Arc::new(replacement);
+        let sources = [
+            ("caller.yks", Arc::clone(&caller)),
+            ("jump.yks", Arc::clone(&replacement)),
+        ];
+        let mut vm = Vm::new_owned(caller);
         vm.set_variable(Slot::DataWord { offset: 4 }, Value::Integer(99))
             .unwrap();
         assert!(matches!(vm.step().unwrap(), Event::Call { .. }));
+        vm = checkpoint_round_trip(&vm, &sources);
         vm.step().unwrap();
         assert!(matches!(vm.step().unwrap(), Event::HostCall { .. }));
+        vm = checkpoint_round_trip(&vm, &sources);
         assert!(vm.resume_script_call(None).is_err());
-        vm.resume_script_jump(Arc::new(replacement)).unwrap();
+        vm.resume_script_jump(replacement).unwrap();
+        vm = checkpoint_round_trip(&vm, &sources);
         vm.step().unwrap();
         assert!(matches!(
             vm.step().unwrap(),
@@ -1234,6 +1559,7 @@ mod tests {
                 ..
             }
         ));
+        vm = checkpoint_round_trip(&vm, &sources);
         assert!(matches!(vm.value(2).unwrap(), Value::Integer(99)));
         assert!(matches!(vm.value(0).unwrap(), Value::Integer(42)));
         assert!(matches!(
@@ -1243,5 +1569,275 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    fn checkpoint_round_trip(vm: &Vm, sources: &[(&str, Arc<Script>)]) -> Vm {
+        let snapshot = vm
+            .checkpoint(|script| {
+                sources
+                    .iter()
+                    .find(|(_, loaded)| Arc::ptr_eq(script, loaded))
+                    .map(|(name, _)| name.to_string())
+                    .ok_or_else(|| "unknown source".into())
+            })
+            .unwrap();
+        let bytes = serde_json::to_vec(&snapshot).unwrap();
+        let decoded = serde_json::from_slice(&bytes).unwrap();
+        Vm::restore(decoded, |name| {
+            sources
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, script)| Arc::clone(script))
+                .ok_or_else(|| "source missing".into())
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn checkpoint_round_trip_preserves_each_execution_boundary() {
+        let script = Arc::new(script());
+        let mut original = Vm::new_owned(Arc::clone(&script));
+        original.initialize_default_banks();
+        original
+            .set_variable(
+                Slot::StringVariable {
+                    bank: "String".into(),
+                    id: 20,
+                },
+                Value::String(Text {
+                    text: "爱泽".into(),
+                    bytes: vec![0xb0, 0xae, 0xd4, 0xf3],
+                    had_errors: false,
+                }),
+            )
+            .unwrap();
+        for _ in 0..4 {
+            let mut restored =
+                checkpoint_round_trip(&original, &[("main.yks", Arc::clone(&script))]);
+            assert_eq!(original.memory(), restored.memory());
+            let event = original.step().unwrap();
+            assert_eq!(restored.step().unwrap(), event);
+            if matches!(event, Event::HostCall { .. }) {
+                restored = checkpoint_round_trip(&restored, &[("main.yks", Arc::clone(&script))]);
+                original.resume_host(None).unwrap();
+                restored.resume_host(None).unwrap();
+                assert_eq!(restored.pc, original.pc);
+            }
+        }
+    }
+
+    #[test]
+    fn checkpoint_rejects_corrupt_positions_memory_and_pending_calls() {
+        let script = Arc::new(script());
+        let mut vm = Vm::new_owned(Arc::clone(&script));
+        vm.step().unwrap();
+        vm.step().unwrap();
+        vm.step().unwrap();
+        let valid = vm.checkpoint(|_| Ok("main.yks".into())).unwrap();
+        let restore = |checkpoint| Vm::restore(checkpoint, |_| Ok(Arc::clone(&script)));
+        let mut bad = valid.clone();
+        bad.pc = 2;
+        assert!(restore(bad).is_err());
+        let mut bad = valid.clone();
+        bad.pc = u32::MAX;
+        assert!(restore(bad).is_err());
+        let mut bad = valid.clone();
+        bad.pending_call = Some((Event::Halted, 7));
+        assert!(restore(bad).is_err());
+        let mut bad = valid.clone();
+        bad.pending_call.as_mut().unwrap().1 = 4;
+        assert!(restore(bad).is_err());
+        let mut bad = valid.clone();
+        if let Event::HostCall { arguments, .. } = &mut bad.pending_call.as_mut().unwrap().0 {
+            arguments[0] = Value::Integer(99);
+        }
+        assert!(restore(bad).is_err());
+        let mut bad = valid.clone();
+        bad.memory.push(bad.memory[0].clone());
+        assert!(restore(bad).is_err());
+        let mut bad = valid.clone();
+        bad.memory[0].1 = Value::String(text("wrong type"));
+        assert!(restore(bad).is_err());
+        let mut bad = valid.clone();
+        bad.memory
+            .push((Slot::DataWord { offset: u32::MAX }, Value::Integer(0)));
+        assert!(restore(bad).is_err());
+        let mut bad = valid.clone();
+        bad.memory.push((Slot::Local { id: 0 }, Value::Integer(0)));
+        assert!(restore(bad).is_err());
+        let mut bad = valid.clone();
+        bad.awaiting_return = true;
+        assert!(restore(bad).is_err());
+        let mut changed = script.as_ref().clone();
+        changed.data[0] ^= 1;
+        assert!(Vm::restore(valid.clone(), |_| Ok(Arc::new(changed.clone()))).is_err());
+        assert!(restore(valid).is_ok());
+        assert_eq!(vm.pc, 4);
+    }
+
+    #[test]
+    fn selection_resumes_exact_case_and_survives_checkpoint() {
+        let mut script = script();
+        script.entries[3].element = Element::Function {
+            name: text("Select"),
+        };
+        let case = script.entries.len() as u32;
+        script.entries.push(IndexEntry {
+            kind: 0,
+            fields: [0; 3],
+            element: Element::Function { name: text("Case") },
+        });
+        let return_function = script.entries.len() as u32;
+        script.entries.push(IndexEntry {
+            kind: 0,
+            fields: [0; 3],
+            element: Element::Function {
+                name: text("Return"),
+            },
+        });
+        let first_label = script.entries.len() as u32;
+        script.entries.push(IndexEntry {
+            kind: 5,
+            fields: [0; 3],
+            element: Element::String {
+                value: text("第一项"),
+            },
+        });
+        let second_label = script.entries.len() as u32;
+        script.entries.push(IndexEntry {
+            kind: 5,
+            fields: [0; 3],
+            element: Element::String {
+                value: text("第二项"),
+            },
+        });
+        let second_value = add_integer(&mut script, 99);
+        let outer = add_control(&mut script, "{", 25);
+        let outer_close = add_control(&mut script, "}", 2);
+        let first_body = add_control(&mut script, "{", 13);
+        let first_close = add_control(&mut script, "}", 6);
+        let second_body = add_control(&mut script, "{", 24);
+        let second_close = add_control(&mut script, "}", 17);
+        script.code = vec![
+            3,
+            0,
+            outer,
+            case,
+            1,
+            first_label,
+            first_body,
+            0,
+            1,
+            1,
+            2,
+            return_function,
+            0,
+            first_close,
+            case,
+            1,
+            second_label,
+            second_body,
+            0,
+            1,
+            1,
+            second_value,
+            return_function,
+            0,
+            second_close,
+            outer_close,
+        ];
+        let script = Arc::new(script);
+        for (index, expected) in [(0, 42), (1, 99)] {
+            let mut vm = Vm::new_owned(Arc::clone(&script));
+            vm.step().unwrap();
+            assert_eq!(
+                vm.selection_options().unwrap(),
+                vec![
+                    SelectionOption {
+                        label: "第一项".into(),
+                        branch_pc: 6
+                    },
+                    SelectionOption {
+                        label: "第二项".into(),
+                        branch_pc: 17
+                    },
+                ]
+            );
+            assert!(vm.resume_host(None).is_err());
+            assert!(vm.resume_selection(2).is_err());
+            assert_eq!(vm.pc, 0);
+            vm = checkpoint_round_trip(&vm, &[("select.yks", Arc::clone(&script))]);
+            vm.resume_selection(index).unwrap();
+            vm = checkpoint_round_trip(&vm, &[("select.yks", Arc::clone(&script))]);
+            let mut assignments = 0;
+            loop {
+                match vm.step().unwrap() {
+                    Event::Assigned { value, .. } => {
+                        assignments += 1;
+                        assert_eq!(value, Value::Integer(expected));
+                    }
+                    Event::Returned {
+                        destination: None, ..
+                    } => break,
+                    Event::HostCall { .. } => panic!("selected branch must execute in VM"),
+                    _ => {}
+                }
+            }
+            assert_eq!(assignments, 1);
+        }
+    }
+
+    #[test]
+    fn checkpoint_rejects_corrupt_local_frames() {
+        let mut script = script();
+        script.header.max_locals = 1;
+        script.entries[3].element = Element::Function {
+            name: text("ScriptCall"),
+        };
+        let sub = add_control(&mut script, "SUB", 5);
+        let return_function = script.entries.len() as u32;
+        script.entries.push(IndexEntry {
+            kind: 0,
+            fields: [0; 3],
+            element: Element::Function {
+                name: text("Return"),
+            },
+        });
+        script.code = vec![3, 1, sub, return_function, 0, sub, return_function, 0];
+        let script = Arc::new(script);
+        let mut vm = Vm::new_owned(Arc::clone(&script));
+        vm.set_variable(Slot::Local { id: 0 }, Value::Integer(11))
+            .unwrap();
+        vm.step().unwrap();
+        let valid = vm.checkpoint(|_| Ok("main.yks".into())).unwrap();
+        let restore = |checkpoint| Vm::restore(checkpoint, |_| Ok(Arc::clone(&script)));
+        let mut bad = valid.clone();
+        bad.frames[0].return_pc = 0;
+        assert!(restore(bad).is_err());
+        let mut bad = valid.clone();
+        bad.frames[0].return_target = Some(Slot::Local { id: 1 });
+        assert!(restore(bad).is_err());
+        let mut bad = valid.clone();
+        bad.frames[0].memory.push((
+            Slot::IntegerVariable {
+                bank: "Flag".into(),
+                id: 0,
+            },
+            Value::Integer(1),
+        ));
+        assert!(restore(bad).is_err());
+        let mut restored = restore(valid).unwrap();
+        restored.step().unwrap();
+        assert!(matches!(
+            restored.step().unwrap(),
+            Event::Returned {
+                destination: Some(3),
+                ..
+            }
+        ));
+        assert_eq!(
+            restored.memory().get(&Slot::Local { id: 0 }),
+            Some(&Value::Integer(11))
+        );
     }
 }
