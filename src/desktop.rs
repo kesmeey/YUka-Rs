@@ -24,6 +24,9 @@ pub struct Layer {
     pub additive_color: [u8; 3],
     pub source_rect: Option<[u32; 4]>,
     pub sepia_filter: bool,
+    pub grayscale_filter: bool,
+    pub invert_filter: bool,
+    pub children: BTreeMap<i32, Layer>,
     pub visible: bool,
 }
 
@@ -366,22 +369,55 @@ fn blend(background: u32, foreground: u32, alpha: u8) -> u32 {
 }
 
 fn composite_layers(frame: &mut [u32], layers: &BTreeMap<i32, Layer>) {
-    for layer in layers
-        .values()
-        .filter(|layer| layer.visible && layer.opacity > 0)
-    {
-        if layer.sepia_filter {
-            for pixel in frame.iter_mut() {
-                let luminance = f64::from((*pixel >> 16) & 255) * 0.299
-                    + f64::from((*pixel >> 8) & 255) * 0.587
-                    + f64::from(*pixel & 255) * 0.114;
-                let red = (luminance + 20.02056).clamp(0.0, 255.0) as u32;
-                let green = (luminance - 2.2134).clamp(0.0, 255.0) as u32;
-                let blue = (luminance - 41.11926).clamp(0.0, 255.0) as u32;
-                *pixel = (red << 16) | (green << 8) | blue;
-            }
-            continue;
+    for layer in layers.values() {
+        composite_layer(frame, layer, (0, 0), 255, [0; 3]);
+    }
+}
+
+fn composite_layer(
+    frame: &mut [u32],
+    layer: &Layer,
+    parent_position: (i64, i64),
+    parent_opacity: u8,
+    parent_color: [u8; 3],
+) {
+    if !layer.visible || layer.opacity == 0 {
+        return;
+    }
+    let opacity = ((u16::from(layer.opacity) * u16::from(parent_opacity) + 127) / 255) as u8;
+    if opacity == 0 {
+        return;
+    }
+    let position = (
+        parent_position.0.saturating_add(i64::from(layer.x)),
+        parent_position.1.saturating_add(i64::from(layer.y)),
+    );
+    let color = [
+        parent_color[0].saturating_add(layer.additive_color[0]),
+        parent_color[1].saturating_add(layer.additive_color[1]),
+        parent_color[2].saturating_add(layer.additive_color[2]),
+    ];
+    if layer.invert_filter {
+        for pixel in frame.iter_mut() {
+            *pixel ^= 0x00ff_ffff;
         }
+    } else if layer.grayscale_filter {
+        for pixel in frame.iter_mut() {
+            let gray =
+                (3 * ((*pixel >> 16) & 255) + 6 * ((*pixel >> 8) & 255) + (*pixel & 255)) / 10;
+            *pixel = (gray << 16) | (gray << 8) | gray;
+        }
+    } else if layer.sepia_filter {
+        for pixel in frame.iter_mut() {
+            let luminance = f64::from((*pixel >> 16) & 255) * 0.299
+                + f64::from((*pixel >> 8) & 255) * 0.587
+                + f64::from(*pixel & 255) * 0.114;
+            let red = (luminance + 20.02056).clamp(0.0, 255.0) as u32;
+            let green = (luminance - 2.2134).clamp(0.0, 255.0) as u32;
+            let blue = (luminance - 41.11926).clamp(0.0, 255.0) as u32;
+            *pixel = (red << 16) | (green << 8) | blue;
+        }
+    } else {
         let rect = layer
             .source_rect
             .unwrap_or([0, 0, layer.image.width(), layer.image.height()]);
@@ -389,26 +425,28 @@ fn composite_layers(frame: &mut [u32], layers: &BTreeMap<i32, Layer>) {
         let source_top = rect[1].min(layer.image.height());
         let source_width = i64::from(rect[2].min(layer.image.width() - source_left));
         let source_height = i64::from(rect[3].min(layer.image.height() - source_top));
-        let x = i64::from(layer.x);
-        let y = i64::from(layer.y);
-        let left = (-x).clamp(0, source_width);
-        let right = (WIDTH as i64 - x).clamp(0, source_width);
-        let top = (-y).clamp(0, source_height);
-        let bottom = (HEIGHT as i64 - y).clamp(0, source_height);
+        let (x, y) = position;
+        let left = x.saturating_neg().clamp(0, source_width);
+        let right = (WIDTH as i64).saturating_sub(x).clamp(0, source_width);
+        let top = y.saturating_neg().clamp(0, source_height);
+        let bottom = (HEIGHT as i64).saturating_sub(y).clamp(0, source_height);
         for source_y in top..bottom {
             for source_x in left..right {
                 let rgba = layer
                     .image
                     .get_pixel(source_left + source_x as u32, source_top + source_y as u32)
                     .0;
-                let alpha = ((u16::from(rgba[3]) * u16::from(layer.opacity) + 127) / 255) as u8;
-                let foreground = (u32::from(rgba[0].saturating_add(layer.additive_color[0])) << 16)
-                    | (u32::from(rgba[1].saturating_add(layer.additive_color[1])) << 8)
-                    | u32::from(rgba[2].saturating_add(layer.additive_color[2]));
+                let alpha = ((u16::from(rgba[3]) * u16::from(opacity) + 127) / 255) as u8;
+                let foreground = (u32::from(rgba[0].saturating_add(color[0])) << 16)
+                    | (u32::from(rgba[1].saturating_add(color[1])) << 8)
+                    | u32::from(rgba[2].saturating_add(color[2]));
                 let pixel = &mut frame[(source_y + y) as usize * WIDTH + (source_x + x) as usize];
                 *pixel = blend(*pixel, foreground, alpha);
             }
         }
+    }
+    for child in layer.children.values() {
+        composite_layer(frame, child, position, opacity, color);
     }
 }
 
@@ -836,6 +874,12 @@ pub fn play(
                 }
             }
         }
+        if ui.screen == Screen::Playing && runtime.scene.finished {
+            runtime.set_paused(true);
+            ui.enter(Screen::Title);
+            ui.inform("本次路线播放结束");
+            dirty = true;
+        }
         if dirty {
             if ui.screen == Screen::Title
                 || (ui.screen == Screen::LoadSlots && ui.parent == Screen::Title)
@@ -1001,6 +1045,9 @@ mod tests {
                     additive_color: [0; 3],
                     source_rect: None,
                     sepia_filter: true,
+                    grayscale_filter: false,
+                    invert_filter: false,
+                    children: BTreeMap::new(),
                     visible: true,
                 },
             ),
@@ -1014,6 +1061,9 @@ mod tests {
                     additive_color: [0; 3],
                     source_rect: None,
                     sepia_filter: false,
+                    grayscale_filter: false,
+                    invert_filter: false,
+                    children: BTreeMap::new(),
                     visible: true,
                 },
             ),
@@ -1022,6 +1072,140 @@ mod tests {
         composite_layers(&mut frame, &layers);
         assert_eq!(frame[0], 0x00ff00);
         assert_eq!(frame[1], 0xfffcd5);
+    }
+
+    #[test]
+    fn invert_filter_preserves_following_layers_and_obeys_visibility() {
+        let image = Arc::new(RgbaImage::from_pixel(1, 1, image::Rgba([0, 255, 0, 255])));
+        let mut layers = BTreeMap::from([
+            (
+                10,
+                Layer {
+                    image: image.clone(),
+                    x: 0,
+                    y: 0,
+                    opacity: 255,
+                    additive_color: [0; 3],
+                    source_rect: None,
+                    sepia_filter: false,
+                    grayscale_filter: false,
+                    invert_filter: true,
+                    children: BTreeMap::new(),
+                    visible: true,
+                },
+            ),
+            (
+                11,
+                Layer {
+                    image,
+                    x: 0,
+                    y: 0,
+                    opacity: 255,
+                    additive_color: [0; 3],
+                    source_rect: None,
+                    sepia_filter: false,
+                    grayscale_filter: false,
+                    invert_filter: false,
+                    children: BTreeMap::new(),
+                    visible: true,
+                },
+            ),
+        ]);
+        let mut frame = vec![0x123456; WIDTH * HEIGHT];
+        composite_layers(&mut frame, &layers);
+        assert_eq!(frame[0], 0x00ff00);
+        assert_eq!(frame[1], 0xedcba9);
+        layers.get_mut(&10).unwrap().visible = false;
+        frame.fill(0x123456);
+        composite_layers(&mut frame, &layers);
+        assert_eq!(frame[1], 0x123456);
+    }
+
+    #[test]
+    fn grayscale_filter_uses_integer_weights_before_following_layers() {
+        let image = Arc::new(RgbaImage::from_pixel(1, 1, image::Rgba([0, 255, 0, 255])));
+        let mut layers = BTreeMap::from([
+            (
+                10,
+                Layer {
+                    image: image.clone(),
+                    x: 0,
+                    y: 0,
+                    opacity: 255,
+                    additive_color: [0; 3],
+                    source_rect: None,
+                    sepia_filter: false,
+                    grayscale_filter: true,
+                    invert_filter: false,
+                    visible: true,
+                    children: BTreeMap::new(),
+                },
+            ),
+            (
+                11,
+                Layer {
+                    image,
+                    x: 0,
+                    y: 0,
+                    opacity: 255,
+                    additive_color: [0; 3],
+                    source_rect: None,
+                    sepia_filter: false,
+                    grayscale_filter: false,
+                    invert_filter: false,
+                    visible: true,
+                    children: BTreeMap::new(),
+                },
+            ),
+        ]);
+        let mut frame = vec![0x123456; WIDTH * HEIGHT];
+        composite_layers(&mut frame, &layers);
+        assert_eq!(frame[0], 0x00ff00);
+        assert_eq!(frame[1], 0x2d2d2d);
+        layers.get_mut(&10).unwrap().visible = false;
+        frame.fill(0x123456);
+        composite_layers(&mut frame, &layers);
+        assert_eq!(frame[1], 0x123456);
+    }
+
+    #[test]
+    fn child_sprites_inherit_parent_position_opacity_color_and_visibility() {
+        let child = Layer {
+            image: Arc::new(RgbaImage::from_pixel(1, 1, image::Rgba([200, 20, 40, 255]))),
+            x: 2,
+            y: 1,
+            opacity: 128,
+            additive_color: [0, 20, 0],
+            source_rect: None,
+            sepia_filter: false,
+            grayscale_filter: false,
+            invert_filter: false,
+            visible: true,
+            children: BTreeMap::new(),
+        };
+        let parent = Layer {
+            image: Arc::new(RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 0]))),
+            x: 3,
+            y: 4,
+            opacity: 128,
+            additive_color: [20, 0, 0],
+            source_rect: None,
+            sepia_filter: false,
+            grayscale_filter: false,
+            invert_filter: false,
+            visible: true,
+            children: BTreeMap::from([(1, child)]),
+        };
+        let mut layers = BTreeMap::from([(7, parent)]);
+        let mut frame = vec![0; WIDTH * HEIGHT];
+        composite_layers(&mut frame, &layers);
+        assert_eq!(frame[5 * WIDTH + 5], 0x370a0a);
+        assert_eq!(frame[WIDTH + 2], 0);
+        assert_eq!(frame.iter().filter(|&&pixel| pixel != 0).count(), 1);
+        layers.get_mut(&7).unwrap().visible = false;
+        frame.fill(0);
+        composite_layers(&mut frame, &layers);
+        assert!(frame.iter().all(|&pixel| pixel == 0));
     }
 
     #[test]
@@ -1038,6 +1222,9 @@ mod tests {
                 additive_color: [100, 20, 0],
                 source_rect: Some([1, 1, 1, 1]),
                 sepia_filter: false,
+                grayscale_filter: false,
+                invert_filter: false,
+                children: BTreeMap::new(),
                 visible: true,
             },
         )]);
@@ -1065,6 +1252,9 @@ mod tests {
                 additive_color: [0; 3],
                 source_rect: None,
                 sepia_filter: false,
+                grayscale_filter: false,
+                invert_filter: false,
+                children: BTreeMap::new(),
                 visible: true,
             },
         )]);
@@ -1089,6 +1279,9 @@ mod tests {
                     additive_color: [0; 3],
                     source_rect: None,
                     sepia_filter: false,
+                    grayscale_filter: false,
+                    invert_filter: false,
+                    children: BTreeMap::new(),
                     visible: true,
                 },
             ),
@@ -1102,6 +1295,9 @@ mod tests {
                     additive_color: [0; 3],
                     source_rect: None,
                     sepia_filter: false,
+                    grayscale_filter: false,
+                    invert_filter: false,
+                    children: BTreeMap::new(),
                     visible: true,
                 },
             ),

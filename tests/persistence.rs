@@ -47,6 +47,10 @@ impl Drop for TestDirectory {
 }
 
 fn runtime(entry: &str) -> Result<Runtime> {
+    runtime_with_limit(entry, 120)
+}
+
+fn runtime_with_limit(entry: &str, page_limit: usize) -> Result<Runtime> {
     let game = std::env::var_os("YUKA_GAME_DIR")
         .ok_or("set YUKA_GAME_DIR to the local Loverable GBK game directory")?;
     Runtime::new(
@@ -55,7 +59,7 @@ fn runtime(entry: &str) -> Result<Runtime> {
         TextEncoding::Gbk,
         true,
         true,
-        120,
+        page_limit,
     )
 }
 
@@ -140,6 +144,19 @@ fn assert_state(runtime: &Runtime, expected: &State) {
         assert_eq!(
             actual.sepia_filter, expected.sepia_filter,
             "layer {slot} sepia filter"
+        );
+        assert_eq!(
+            actual.invert_filter, expected.invert_filter,
+            "layer {slot} invert filter"
+        );
+        assert_eq!(
+            actual.grayscale_filter, expected.grayscale_filter,
+            "layer {slot} grayscale filter"
+        );
+        assert_eq!(
+            actual.children.len(),
+            expected.children.len(),
+            "layer {slot} child count"
         );
         assert_eq!(
             actual.image.dimensions(),
@@ -255,5 +272,61 @@ fn save_restores_pending_external_script_caller_frames() -> Result<()> {
     assert_state(&runtime, &before);
     advance_to(&mut runtime, 60)?;
     assert_state(&runtime, &after);
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires local Loverable GBK game data via YUKA_GAME_DIR"]
+fn restored_prologue_returns_to_caller_and_enters_the_next_script() -> Result<()> {
+    let directory = TestDirectory::new()?;
+    let save = directory.file("slot.json");
+    let mut runtime = runtime_with_limit(PLAY_SCRIPT, 600)?;
+    advance_to(&mut runtime, 540)?;
+    assert!(runtime.report().script.ends_with("prologue1.yks"));
+    let before = state(&runtime);
+    runtime.save(&save)?;
+    advance_to(&mut runtime, 550)?;
+    assert!(runtime.report().script.ends_with("prologue2.yks"));
+    let after = state(&runtime);
+    runtime.load(&save)?;
+    assert_state(&runtime, &before);
+    advance_to(&mut runtime, 550)?;
+    assert_state(&runtime, &after);
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires local Loverable GBK game data via YUKA_GAME_DIR"]
+fn a_saved_real_choice_can_resume_either_branch() -> Result<()> {
+    let directory = TestDirectory::new()?;
+    let save = directory.file("choice.json");
+    let mut runtime = runtime("yks\\story\\common\\CHAPTER3-3.YKS")?;
+    for _ in 0..100 {
+        if !runtime.choices().is_empty() {
+            break;
+        }
+        runtime.advance()?;
+        runtime.tick()?;
+    }
+    assert_eq!(runtime.choices().len(), 2);
+    assert!(runtime.choices()[0].contains("柳濑"));
+    assert!(runtime.choices()[1].contains("花穗"));
+    assert!(runtime.can_save());
+    let choice = state(&runtime);
+    runtime.save(&save)?;
+    runtime.choose(1)?;
+    let kaho = state(&runtime);
+    assert!(runtime.choices().is_empty());
+    assert!(kaho.script.ends_with("chapter3-3.yks"));
+    runtime.load(&save)?;
+    assert_state(&runtime, &choice);
+    runtime.choose(1)?;
+    assert_state(&runtime, &kaho);
+    runtime.load(&save)?;
+    runtime.choose(0)?;
+    assert!(runtime.choices().is_empty());
+    assert_ne!(runtime.report().pc, kaho.pc);
+    assert_ne!(runtime.scene.dialogue, kaho.scene.dialogue);
+    assert!(runtime.scene.dialogue.contains("柳濑"));
     Ok(())
 }

@@ -17,7 +17,9 @@ use std::{
 pub const DEFAULT_SCRIPT: &str = "yks\\story\\common\\PROLOGUE1.YKS";
 pub const PLAY_SCRIPT: &str = "yks\\root\\root_Common.yks";
 
+mod graphics_host;
 mod persistence;
+use graphics_host::GraphicsEffects;
 
 struct Activation {
     name: String,
@@ -54,6 +56,7 @@ pub struct DemoReport {
     pub script: String,
     pub pc: u32,
     pub finished: bool,
+    pub end_reason: Option<String>,
     pub host_commands: BTreeMap<String, usize>,
     pub approximations: BTreeSet<String>,
     pub choices: Vec<String>,
@@ -84,6 +87,9 @@ pub struct Runtime {
     save_directory: Option<PathBuf>,
     autosave_requested: bool,
     random_state: u64,
+    effects: GraphicsEffects,
+    timers: BTreeMap<i32, Instant>,
+    end_reason: Option<String>,
 }
 
 fn int(arguments: &[Value], index: usize) -> Result<i32> {
@@ -170,6 +176,9 @@ impl Runtime {
                 .unwrap_or_default()
                 .as_nanos() as u64
                 | 1,
+            effects: GraphicsEffects::default(),
+            timers: BTreeMap::new(),
+            end_reason: None,
         };
         runtime.drive()?;
         Ok(runtime)
@@ -187,6 +196,7 @@ impl Runtime {
             script: self.stack.last().map_or(String::new(), |a| a.name.clone()),
             pc: self.stack.last().map_or(0, |a| a.vm.pc),
             finished: self.scene.finished,
+            end_reason: self.end_reason.clone(),
             host_commands: self.commands.clone(),
             approximations: self.approximations.clone(),
             choices: self.scene.choices.clone(),
@@ -216,6 +226,7 @@ impl Runtime {
         if matches!(self.waiting, Waiting::Key) {
             if self.page_limit != 0 && self.pages >= self.page_limit {
                 self.scene.finished = true;
+                self.end_reason = Some("page_limit".into());
                 self.sound.stop_all();
                 self.status();
                 return Ok(());
@@ -235,7 +246,7 @@ impl Runtime {
         }
         self.sound.tick();
         let now = Instant::now();
-        let mut changed = false;
+        let mut changed = self.effects.tick(&mut self.scene);
         for scroll in &self.scrolls {
             let t = (now.duration_since(scroll.start).as_secs_f32()
                 / scroll.duration.as_secs_f32().max(0.001))
@@ -281,6 +292,7 @@ impl Runtime {
             caller.vm.resume_script_call(value)?;
         } else {
             self.scene.finished = true;
+            self.end_reason = Some("script_return".into());
             self.sound.stop_all();
         }
         Ok(())
@@ -335,6 +347,18 @@ impl Runtime {
                             .into_iter()
                             .map(|option| option.label)
                             .collect();
+                        // The player draws its own selectable rows. Suppress the game's
+                        // empty button artwork so only the active hit targets are visible.
+                        for (&slot, source) in &self.layer_sources {
+                            if source
+                                .replace('\\', "/")
+                                .to_ascii_lowercase()
+                                .starts_with("ykg/system/select/")
+                                && let Some(layer) = self.scene.layers.get_mut(&slot)
+                            {
+                                layer.visible = false;
+                            }
+                        }
                         self.waiting = Waiting::Choice;
                         continue;
                     }
@@ -345,6 +369,16 @@ impl Runtime {
                                 "file script calls with arguments are not implemented in this demo"
                                     .into(),
                             );
+                        }
+                        if function == "ScriptJump"
+                            && name
+                                .replace('\\', "/")
+                                .eq_ignore_ascii_case("yks/title/title_main.yks")
+                        {
+                            self.scene.finished = true;
+                            self.end_reason = Some("return_to_title".into());
+                            self.sound.stop_all();
+                            continue;
                         }
                         let script = self.resources.script(&name)?;
                         if function == "ScriptJump" {
@@ -400,6 +434,16 @@ impl Runtime {
     }
 
     fn host(&mut self, function: &str, args: &[Value]) -> Result<Option<Value>> {
+        if self.effects.handle(
+            function,
+            args,
+            &mut self.scene,
+            &mut self.resources,
+            &mut self.layer_sources,
+            self.fast,
+        )? {
+            return Ok(None);
+        }
         match function {
             "Index" => self.chapter = string(args, 0)?.to_owned(),
             "WindowNameSet" => {
@@ -434,6 +478,37 @@ impl Runtime {
             }
             "SoundStopALL" => self.sound.stop_all(),
             "HistoryReset" => {}
+            "ScriptSkipReset" => {}
+            "ScriptSkipMode" => {
+                let _ = int(args, 0)?;
+            }
+            "SakuraEffect" if args.is_empty() => {}
+            "TimerStart" => {
+                self.timers.insert(int(args, 0)?, Instant::now());
+            }
+            "TimerWait" => {
+                let id = int(args, 0)?;
+                let start = self
+                    .timers
+                    .get(&id)
+                    .ok_or("TimerWait references an unstarted timer")?;
+                let deadline = *start + duration(int(args, 1)?);
+                if !self.fast && deadline > Instant::now() {
+                    self.waiting = Waiting::Timer(deadline);
+                }
+            }
+            "SelectMode" | "SelectPosition" | "TextBorderColor" => {
+                self.approximations
+                    .insert("Choice layout and text borders use the runtime menu".into());
+            }
+            "MovieVolumeSet" => {
+                let _ = int(args, 0)?;
+            }
+            "MoviePlay" => {
+                let _ = string(args, 0)?;
+                self.approximations
+                    .insert("Movie playback is skipped".into());
+            }
             "LF" => self.scene.dialogue.push('\n'),
             "SkipModeCheck" | "AlreadySkipModeCheck" | "AutoModeCheck" => {
                 return Ok(Some(Value::Integer(0)));
@@ -441,26 +516,49 @@ impl Runtime {
             "DrawStop" => self.draw_before = Some(self.scene.layers.clone()),
             "GraphicLoad" | "GraphicLoadHide" => {
                 let slot = int(args, 0)?;
-                let name = string(args, 1)?;
+                let (name, coordinates) = match args.len() {
+                    2 => (string(args, 1)?, None),
+                    4 => (string(args, 1)?, Some((int(args, 2)?, int(args, 3)?))),
+                    5 => {
+                        let mask = string(args, 2)?;
+                        if !mask.to_ascii_lowercase().ends_with(".ykg") {
+                            return Err("external PNG/BMP alpha import is not implemented".into());
+                        }
+                        // This executable's YKG mask branch calls the ordinary YKG loader,
+                        // replacing the color image. See docs/playback-semantics.md.
+                        (mask, Some((int(args, 3)?, int(args, 4)?)))
+                    }
+                    _ => return Err("unsupported GraphicLoad argument count".into()),
+                };
                 let image = self.resources.image(name)?;
+                self.effects.clear_slot(slot, &mut self.scene);
                 self.layer_sources.insert(slot, name.into());
                 self.scrolls.retain(|scroll| scroll.slot != slot);
+                let (old_x, old_y, opacity) = self
+                    .scene
+                    .layers
+                    .get(&slot)
+                    .map_or((0, 0, 255), |layer| (layer.x, layer.y, layer.opacity));
                 self.scene.layers.insert(
                     slot,
                     Layer {
                         image,
-                        x: if args.len() >= 4 { int(args, 2)? } else { 0 },
-                        y: if args.len() >= 4 { int(args, 3)? } else { 0 },
-                        opacity: 255,
+                        x: coordinates.map_or(old_x, |xy| xy.0),
+                        y: coordinates.map_or(old_y, |xy| xy.1),
+                        opacity,
                         visible: function == "GraphicLoad",
                         additive_color: [0; 3],
                         source_rect: None,
                         sepia_filter: false,
+                        invert_filter: false,
+                        grayscale_filter: false,
+                        children: BTreeMap::new(),
                     },
                 );
             }
             "GraphicDelete" => {
                 let slot = int(args, 0)?;
+                self.effects.clear_slot(slot, &mut self.scene);
                 self.scene.layers.remove(&slot);
                 self.layer_sources.remove(&slot);
                 self.scrolls.retain(|scroll| scroll.slot != slot);
@@ -473,11 +571,9 @@ impl Runtime {
                     11 => self.scene.dialogue_offset = (x - 3, y - 473),
                     12 => self.scene.speaker_offset = (x, y - 437),
                     _ => {
-                        let layer = self
-                            .scene
-                            .layers
-                            .get_mut(&slot)
-                            .ok_or_else(|| format!("graphic slot {slot} is not loaded"))?;
+                        let Some(layer) = self.scene.layers.get_mut(&slot) else {
+                            return Ok(None);
+                        };
                         layer.x = x;
                         layer.y = y;
                     }
@@ -510,11 +606,9 @@ impl Runtime {
                 let slot = int(args, 0)?;
                 let milliseconds = int(args, 1)?;
                 let to = (int(args, 2)?, int(args, 3)?);
-                let layer = self
-                    .scene
-                    .layers
-                    .get_mut(&slot)
-                    .ok_or_else(|| format!("graphic slot {slot} is not loaded"))?;
+                let Some(layer) = self.scene.layers.get_mut(&slot) else {
+                    return Ok(None);
+                };
                 self.scrolls.retain(|scroll| scroll.slot != slot);
                 if self.fast || milliseconds <= 0 {
                     layer.x = to.0;
@@ -533,6 +627,11 @@ impl Runtime {
                 let slot = int(args, 0)?;
                 if let Some(scroll) = self.scrolls.iter().find(|s| s.slot == slot) {
                     self.waiting = Waiting::Timer(scroll.start + scroll.duration);
+                }
+            }
+            "GraphicTransmittanceScrollWait" => {
+                if let Some(deadline) = self.effects.deadline(int(args, 0)?) {
+                    self.waiting = Waiting::Timer(deadline);
                 }
             }
             "StrOut" | "StrOutNW" => self.scene.dialogue.push_str(string(args, 0)?),
@@ -582,6 +681,14 @@ impl Runtime {
                     .fade_delete(int(args, 0)?, if self.fast { 0 } else { milliseconds });
             }
             "SoundVolume" => self.sound.volume(int(args, 0)?, int(args, 1)?),
+            "SoundVolumeToFade" => {
+                let milliseconds = if args.len() >= 3 { int(args, 2)? } else { 1000 };
+                self.sound.fade_volume(
+                    int(args, 0)?,
+                    int(args, 1)?,
+                    if self.fast { 0 } else { milliseconds },
+                );
+            }
             "SoundPlayWait" => {
                 if !self.fast && self.sound.is_playing(int(args, 0)?) {
                     self.waiting = Waiting::Sound(int(args, 0)?);

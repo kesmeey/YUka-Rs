@@ -1,17 +1,18 @@
 # yuka-rs
 
 用 Rust 重实现 Yuka System 的项目，面向后续复用原游戏资源的跨平台运行时。
-当前已提供可交互的 Windows 序章 demo，直接执行原始 YKS 脚本，读取 YKC 内的背景、立绘与 Ogg 音频。
+当前提供 Windows 运行时，直接执行原始 YKS 脚本，读取 YKC 内的背景、立绘与 Ogg 音频，支持标题、选择支和存读档。
 
 项目位置为 `E:\llvm-agent\yuka-rs`。本轮以用户提供的《情侣热恋中》汉化版作为真实样本。
 格式和 VM 位于 library crate，桌面宿主使用 minifb、fontdue、image 和 rodio。
 
 ## 交互式运行与存档
 
-双击 `run-game.cmd` 启动带标题菜单的运行入口，也可以执行以下命令。
+双击 `run-game.cmd` 启动带标题菜单的运行入口。本机最新预编译程序为 `bin/yuka-rs.exe`。
+启动器优先使用此程序，也可使用标准 Cargo 输出 `target/release/yuka-rs.exe`。
 
 ```powershell
-.\target\release\yuka-rs.exe play 'D:\gal\love loabe\【PC】情侣热恋中\情侣热恋中（ラブラブル)' --save-dir .\saves
+.\bin\yuka-rs.exe play 'D:\gal\love loabe\【PC】情侣热恋中\情侣热恋中（ラブラブル)' --save-dir .\saves
 ```
 
 标题使用原游戏背景和 logo，菜单由本运行时绘制。“开始游戏”从原版 `root_Common.yks` 调度脚本进入，
@@ -26,12 +27,40 @@
 保存跨文件调用栈、本地帧、变量、图层、对白、选择及随机数状态。读取会核对资源目录索引和脚本内容指纹，
 验证完成后整体替换会话。存档文件通过临时文件和重命名原子写入。音频在读档后从该资源开头播放。
 
-已有四项本地集成测试验证第 40 页存档后推进至第 60 页，恢复后重放得到相同图层像素、文字和脚本位置，
-并覆盖外部脚本调用栈、连续覆盖和损坏存档拒绝。启动菜单、存读档和选择控制均有对应测试。
+六项本地集成测试覆盖 40→60 页回档重放、540→550 页跨序章返回、真实选择的两个分支重选、
+外部调用栈、连续覆盖和损坏存档拒绝。比较内容包括图层像素、位置、滤镜、文字和脚本位置。
+
+## 连续剧情回归
+
+以下测试使用本地汉化样本，跳过实时等待和设备输出，每次选择第一个选项。全部执行到原脚本的
+尾声结束和返回标题跳转，报告 `end_reason` 为 `return_to_title`。
+
+| 入口与测试路径 | 对白等待页数 | 脚本步数 | 选择次数 |
+| --- | ---: | ---: | ---: |
+| `root_Common` → 公共线五章 → `root_Tinatu` → 尾声 | 11,779 | 235,275 | 33 |
+| `root_Kaho` → 尾声 | 4,656 | 96,193 | 13 |
+| `root_Tugumi` → 尾声 | 4,631 | 83,330 | 15 |
+| `root_Nanako` → 尾声 | 4,756 | 80,149 | 15 |
+| `root_Satuki` → 尾声 | 2,871 | 57,577 | 11 |
+
+测试覆盖章节调度、普通及外部 YKG 加载、色彩滤镜、透明度渐变、多个循环 Sprite、演职员表计时和尾声。
+真实播放使用同一套 VM 和命令实现。全部选项组合及完整流程的逐帧音画对照仍待验证。
+窗口已检查标题布局、早期剧情、立绘和中文。桌面操作停止后，F5/F9 的实际按键复测保留待验。
+
+```powershell
+$game = 'D:\gal\love loabe\【PC】情侣热恋中\情侣热恋中（ラブラブル)'
+$choices = ('1,' * 99) + '1'
+.\bin\yuka-rs.exe demo $game --script 'yks\root\root_Common.yks' --headless --pages 20000 --choices $choices --report complete.json
+
+$env:YUKA_GAME_DIR = $game
+cargo test --test persistence -- --ignored
+```
+
+未提供足够的 `--choices` 时，headless 在下一个选择支处结束本次探测，并把选项写入报告。
 
 ## 运行 Demo
 
-双击项目目录中的 `run-demo.cmd`。已编译程序位于 `target/release/yuka-rs.exe`。
+双击项目目录中的 `run-demo.cmd` 运行 100 页回归演示。
 启动器默认读取上述游戏目录，可将其他目录作为第一个参数传入。
 
 - 左键、空格或 Enter 推进对白。
@@ -55,7 +84,7 @@ $game = 'D:\gal\love loabe\【PC】情侣热恋中\情侣热恋中（ラブラ�
 .\target\release\yuka-rs.exe demo $game --headless --pages 100 --screenshot demo.png --report demo.json
 ```
 
-`--pages` 调整演示页数，`--script` 可更换研究入口。已验证的可播放范围为当前汉化样本前 100 页。
+`--pages` 调整演示页数，`--script` 可更换研究入口，完整路径验证范围见上表。
 `--headless` 关闭设备输出并跳过真实时间等待，通过同一个 VM、资源解码和宿主实现执行。
 
 ### 当前演示边界
@@ -64,7 +93,8 @@ $game = 'D:\gal\love loabe\【PC】情侣热恋中\情侣热恋中（ラブラ�
 `Effect` 屏幕震动暂未实现。文字框移动、背景滚动和音频异步淡出已有实现。
 音频统一使用 65% 主音量，再乘脚本设置的局部音量。设备不可用时显示静音状态。
 
-原版设置/鉴赏菜单、视频、完整故事兼容性、其他作品验证和 Android APK 仍待实现。
+`MoviePlay` 当前跳过 OP 视频并记录到报告。原版设置/鉴赏菜单、独立全局解锁存储、
+其他作品验证和 Android APK 仍待实现。存档中的变量状态会随该存档恢复。
 Android 接入还需拆分桌面依赖并提供窗口、触摸、音频和资源访问宿主。
 执行报告中的 `approximations` 记录本次路径使用到的效果近似。
 
@@ -75,12 +105,12 @@ Android 接入还需拆分桌面依赖并提供窗口、触摸、音频和资源
 | `archive` | YKC001 / YKC002 目录、名称解码、边界检查、流式读取 | 5 个 YKC001 包全部读取成功。YKC002 使用合成测试 |
 | `script` | YKS001 数据解混淆、段和符号表、符号指令解码、文字编码选项 | 175 个脚本，312,185 条指令全部通过结构检查 |
 | `graphics` | YKG000 主图、alpha、动画记录，GNP 转标准 PNG 签名 | 7,403 个图像全部通过结构检查，1,334 条动画记录 |
-| `vm` | 赋值、整数运算与比较、字符串拼接、if/else、调用/跳转/返回、共享变量和独立局部帧 | 序章前 100 页与四个传递依赖脚本连续执行 |
-| `runtime` / `desktop` / `sound` | 跨脚本调度、图层合成、中文排版、输入、等待、滚动、交叉淡化、Ogg 播放和异步淡出 | 100 页自动执行，首屏与立绘截图检查，Windows 窗口运行 |
+| `vm` | 整数运算与比较、字符串拼接、if/else、Select/Case、跨脚本调用/跳转/返回、状态快照 | 公共线连贯路径、五个角色入口、存档重放与分支回归 |
+| `runtime` / `desktop` / `sound` | 图层/子 Sprite 合成、三种滤镜、中文、菜单、存读档、计时、滚动、淡化、Ogg 与音量渐变 | 上述五条路径全部返回标题，首屏与立绘截图检查，Windows 窗口运行 |
 | 原生逆向 | Windows API 依赖、命令注册表、关键分发器与处理函数地址 | 339 个注册项，脚本引用的 142 个函数名全部匹配 |
 
 100 页演示执行 1,264 步，加载 5 个脚本，解码 26 次图像资源和 56 次音频资源。
-发布版构建、33 项默认测试、4 项本地存档集成测试、`cargo fmt --check` 和 Clippy 零警告检查通过。
+发布版构建、38 项默认测试、6 项本地存档集成测试、`cargo fmt --check` 和 Clippy 零警告检查通过。
 另有一项依赖本地全部游戏图像的测试，默认忽略，初始格式验证阶段已单独运行通过。
 音频计数表示建立解码器并确认首批样本，实际播放由音频线程继续解码。
 前 100 页最长单页正文为 47 字符。真实样本截图覆盖海景、立绘 alpha 与中文姓名。
@@ -140,6 +170,7 @@ $exe = '.\target\release\yuka-rs.exe'
 - `src/graphics.rs` 与 `docs/ykg.md` 对应图像容器和动画记录。
 - `src/runtime.rs`、`src/resources.rs`、`src/sound.rs`、`src/desktop.rs` 组成桌面 demo。
 - `docs/demo-semantics.md` 记录序章入口、默认状态、相关原生命令依据和近似行为。
+- `docs/playback-semantics.md` 记录连续故事、选择、滤镜、图集动画和演职员表的原生依据。
 - `docs/native-analysis.md` 记录原程序身份、函数地址、静态语义和复现方法。
 - `evidence/` 保存本机的完整 REA 输出、原生命令表、验证结果和启动脚本跟踪。
 

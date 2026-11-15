@@ -12,6 +12,8 @@ struct Fade {
     start: Instant,
     duration: Duration,
     volume: f32,
+    target: f32,
+    delete: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -131,6 +133,26 @@ impl Sound {
                 start: Instant::now(),
                 duration: Duration::from_millis(milliseconds as u64),
                 volume,
+                target: 0.0,
+                delete: true,
+            },
+        );
+    }
+
+    pub fn fade_volume(&mut self, slot: i32, target: i32, milliseconds: i32) {
+        self.fades.remove(&slot);
+        if milliseconds <= 0 || !self.is_playing(slot) {
+            self.volume(slot, target);
+            return;
+        }
+        self.fades.insert(
+            slot,
+            Fade {
+                start: Instant::now(),
+                duration: Duration::from_millis(milliseconds as u64),
+                volume: self.sinks[&slot].volume(),
+                target: target.clamp(0, 1000) as f32 / 1000.0 * 0.65,
+                delete: false,
             },
         );
     }
@@ -146,14 +168,19 @@ impl Sound {
                 / fade.duration.as_secs_f32())
             .min(1.0);
             if let Some(sink) = self.sinks.get(&slot) {
-                sink.set_volume(fade.volume * (1.0 - progress));
+                sink.set_volume(fade.volume + (fade.target - fade.volume) * progress);
             }
             if progress >= 1.0 {
-                finished.push(slot);
+                finished.push((slot, fade.delete, fade.target));
             }
         }
-        for slot in finished {
-            self.delete(slot);
+        for (slot, delete, target) in finished {
+            self.fades.remove(&slot);
+            if delete {
+                self.delete(slot);
+            } else {
+                self.volume(slot, (target / 0.65 * 1000.0).round() as i32);
+            }
         }
     }
 

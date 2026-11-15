@@ -18,6 +18,10 @@ struct SavedLayer {
     additive_color: [u8; 3],
     source_rect: Option<[u32; 4]>,
     sepia_filter: bool,
+    #[serde(default)]
+    invert_filter: bool,
+    #[serde(default)]
+    grayscale_filter: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -39,6 +43,8 @@ struct Save {
     speaker_offset: (i32, i32),
     dialogue_offset: (i32, i32),
     choices: Vec<String>,
+    #[serde(default)]
+    timers: BTreeMap<i32, u64>,
 }
 
 impl Runtime {
@@ -57,6 +63,7 @@ impl Runtime {
             && self.scrolls.is_empty()
             && self.draw_before.is_none()
             && self.sound.is_stable()
+            && self.effects.is_stable()
     }
 
     pub fn restart(&mut self) -> Result<()> {
@@ -89,6 +96,10 @@ impl Runtime {
             if let Some(fade) = &mut self.fade {
                 fade.start += elapsed;
             }
+            self.effects.shift_time(elapsed);
+            for timer in self.timers.values_mut() {
+                *timer += elapsed;
+            }
         }
         self.sound.set_paused(paused);
     }
@@ -110,6 +121,9 @@ impl Runtime {
                 additive_color: [0; 3],
                 source_rect: None,
                 sepia_filter: false,
+                invert_filter: false,
+                grayscale_filter: false,
+                children: BTreeMap::new(),
             },
         );
         let logo = self.resources.image("ykg\\title\\logo.ykg")?;
@@ -126,6 +140,9 @@ impl Runtime {
                     additive_color: [0; 3],
                     source_rect: None,
                     sepia_filter: false,
+                    invert_filter: false,
+                    grayscale_filter: false,
+                    children: BTreeMap::new(),
                 },
             );
         }
@@ -179,6 +196,8 @@ impl Runtime {
                 additive_color: layer.additive_color,
                 source_rect: layer.source_rect,
                 sepia_filter: layer.sepia_filter,
+                invert_filter: layer.invert_filter,
+                grayscale_filter: layer.grayscale_filter,
             });
         }
         let save = Save {
@@ -199,6 +218,20 @@ impl Runtime {
             speaker_offset: self.scene.speaker_offset,
             dialogue_offset: self.scene.dialogue_offset,
             choices: self.scene.choices.clone(),
+            timers: self
+                .timers
+                .iter()
+                .map(|(&id, start)| {
+                    (
+                        id,
+                        self.paused_at
+                            .unwrap_or_else(Instant::now)
+                            .saturating_duration_since(*start)
+                            .as_millis()
+                            .min(u128::from(u64::MAX)) as u64,
+                    )
+                })
+                .collect(),
         };
         write_atomic(path, &serde_json::to_vec(&save)?)
     }
@@ -274,7 +307,7 @@ impl Runtime {
             {
                 return Err("duplicate saved layer".into());
             }
-            let image = if layer.sepia_filter {
+            let image = if layer.sepia_filter || layer.invert_filter || layer.grayscale_filter {
                 std::sync::Arc::new(image::RgbaImage::new(0, 0))
             } else {
                 resources.image(&layer.resource)?
@@ -290,6 +323,9 @@ impl Runtime {
                     additive_color: layer.additive_color,
                     source_rect: layer.source_rect,
                     sepia_filter: layer.sepia_filter,
+                    invert_filter: layer.invert_filter,
+                    grayscale_filter: layer.grayscale_filter,
+                    children: BTreeMap::new(),
                 },
             );
         }
@@ -306,6 +342,16 @@ impl Runtime {
                 sound.play(slot, state.looping)?;
             }
         }
+        let mut timers = BTreeMap::new();
+        for (id, elapsed) in save.timers {
+            timers.insert(
+                id,
+                Instant::now()
+                    .checked_sub(Duration::from_millis(elapsed))
+                    .ok_or("invalid saved timer")?,
+            );
+        }
+        self.timers = timers;
         self.stack = stack;
         self.scene = scene;
         self.resources = resources;
@@ -321,7 +367,11 @@ impl Runtime {
         } else {
             Waiting::Choice
         };
+        self.autosave_requested = false;
+        self.end_reason = None;
+        self.paused_at = self.paused_at.map(|_| Instant::now());
         self.scrolls.clear();
+        self.effects = GraphicsEffects::default();
         self.fade = None;
         self.draw_before = None;
         self.sound.set_paused(self.paused_at.is_some());
