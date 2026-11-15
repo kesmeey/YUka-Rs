@@ -6,6 +6,51 @@
 项目位置为 `E:\llvm-agent\yuka-rs`。本轮以用户提供的《情侣热恋中》汉化版作为真实样本。
 格式和 VM 位于 library crate，桌面宿主使用 minifb、fontdue、image 和 rodio。
 
+## 《情侣热恋中》完整游戏 APK
+
+`bin/Loverable-Yuka-Rs-0.2.1.apk` 将 Rust 引擎与本机汉化版的五个原始 `data*.ykc` 资源包一起打包。
+应用包名为 `org.yukars.loverable`，最低版本为 Android 8.0，包含 `arm64-v8a` 和 `x86_64`。
+APK 为 3,141,125,080 字节（约 2.93 GiB），已通过签名校验并在 Android 15 x86_64 模拟器安装成功。
+资源采用 XZ preset 3 无损压缩。首次启动会显示解包进度，将资源流式恢复到应用私有目录并核对原文件的
+长度及 SHA-256，完成后进入游戏标题。后续启动复用已完成的资源，解包中断后可重新打开应用继续准备。
+
+安装 APK 后打开“情侣热恋中”，等待首次资源准备完成，再选择“开始游戏”。已有的 PC 剧情存档可从
+“读取存档”中的“选择手机上的 PC 存档文件”导入。应用继续使用下方说明的原版二进制存档格式，
+暂停菜单提供完整 `Save` 目录导出。
+
+设备首次解包后的五个 YKC 文件 SHA-256 均与 PC 原包一致。完整 APK 已通过标题与新游戏点击、
+快速存读档、后台自动保存后重启继续、PC 原档与回存档读取续行、选择支两个分支恢复及音频焦点回归。
+资源准备中断后的恢复和已完成资源的复用也已检查。应用与展开资源合计约占 7.56 GB，另存的 APK 文件占用额外空间。
+ARM64 当前完成交叉编译，实机运行、扬声器输出和完整路线的逐帧音画对照仍待验证。
+OP 视频及特效边界见下方“当前演示边界”。
+
+### 构建完整游戏 APK
+
+以下命令在项目根目录的 PowerShell 7 中执行。资源准备需要 Python 3，Android 构建需要 SDK Platform、
+Build Tools、NDK、Java 工具链及 XZ for Java 1.12。构建脚本默认读取
+`target/android-libs/xz-1.12.jar`，也可通过 `-XzJar` 指定位置。依赖采用 0BSD 许可证。
+[XZ for Java](https://tukaani.org/xz/java.html)
+
+```powershell
+New-Item -ItemType Directory -Force -Path .\target\android-libs | Out-Null
+curl.exe --fail --location 'https://repo.maven.apache.org/maven2/org/tukaani/xz/1.12/xz-1.12.jar' --output .\target\android-libs\xz-1.12.jar
+
+$game = 'D:\gal\love loabe\【PC】情侣热恋中\情侣热恋中（ラブラブル)'
+python .\android\prepare-game.py $game .\target\bundled-loverable\assets
+.\android\build.ps1 `
+    -SdkPlatform .\target\android-sdk\android-35 `
+    -BuildTools .\target\android-sdk\android-15 `
+    -Ndk .\target\android-sdk\android-ndk-r27c `
+    -JavaHome 'E:\DevEco Studio\jbr' `
+    -BundleDirectory .\target\bundled-loverable\assets
+```
+
+资源准备会校验每个 XZ 文件解压后的长度与 SHA-256，再写入资源清单。构建完成后校验 APK 签名和对齐。
+本次五个原始包合计 4,417,273,802 字节，XZ 数据合计 3,136,805,240 字节，主机重解压后的五份 SHA-256
+均与原包一致。APK 校验值和设备测试记录见 `android/TESTING.md`。
+本地成品与资源构建产物位于已忽略的 `bin/` 和 `target/`，源仓库记录打包代码和验证说明。
+安装及存档测试命令见 `android/TESTING.md`。
+
 ## 交互式运行与存档
 
 双击 `run-game.cmd` 启动带标题菜单的运行入口。本机最新预编译程序为 `bin/yuka-rs.exe`。
@@ -33,10 +78,10 @@
 ## Android 与原版存档
 
 Android 宿主使用 Java 触摸界面、MediaPlayer 音频输出和 Rust JNI，最低版本为 Android 8.0。
-构建包含 `arm64-v8a` 和 `x86_64` 两种 ABI，产物路径为 `bin/Yuka-Rs-0.2.0.apk`。
+通用播放器构建包含 `arm64-v8a` 和 `x86_64` 两种 ABI，当前产物路径为 `bin/Yuka-Rs-0.2.1.apk`。
 构建脚本为 `android/build.ps1`，需要传入 SDK Platform、Build Tools、NDK 和 Java 工具链目录。
 
-安装后选择“导入游戏文件夹”，选中包含 `data*.ykc` 的游戏目录。导入器把资源和已有 `Save` 目录复制到应用私有存储，
+通用播放器安装后选择“导入游戏文件夹”，选中包含 `data*.ykc` 的游戏目录。导入器把资源和已有 `Save` 目录复制到应用私有存储，
 标题提供开始、继续和读取存档。触摸推进对白，选择支直接点选，返回键打开暂停菜单。
 暂停菜单可存读档，并可通过“导出完整存档目录”导出供 PC 使用的存档文件。
 
@@ -49,7 +94,7 @@ GlobalFlag/GlobalString 与已读记录独立保存，读取较早的剧情槽�
 当前原格式兼容性以本机《情侣热恋中》汉化版样本为范围。已完成原档读取、40 页推进后的再次保存/读取、
 新游戏无模板导出、真实选择支保存/恢复，以及全局整数、中文字符串、已读标记和失败加载回归。
 隔离运行的原版 PC 程序已加载真实选择档 `savedata.006`，点击首项后回到调用章节并继续通过 11 个对白等待点。
-Android 15 x86_64 模拟器已完成 Android 生成 `savedata.005`、原版 PC 加载并推进、PC 回存 `savedata.021`、
+通用播放器 0.2.0 在 Android 15 x86_64 模拟器中已完成 Android 生成 `savedata.005`、原版 PC 加载并推进、PC 回存 `savedata.021`、
 Android 再读取和继续剧情的完整往返。原档读回再保存的正文、姓名、选择和图层帧一致性检查通过。
 同一 APK 已恢复真实选择档 `savedata.006` 的两个分支，并通过音频焦点恢复测试和实际点击检查。
 原 PC 完成选择后写出的 `savedata.022` 也已在 Android 读取、再保存和继续剧情。

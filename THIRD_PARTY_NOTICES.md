@@ -38,3 +38,27 @@ IN THE SOFTWARE.
 `references/` holds locally downloaded research material. `evidence/` holds
 local inspection results. Both are ignored by Git along with extracted assets.
 Game resources and the Windows executable are supplied separately by the user.
+
+## XZ for Java 1.12
+
+The Android asset importer uses XZ for Java 1.12 (`org.tukaani:xz:1.12`) to
+decompress bundled game archives. XZ for Java is distributed under the BSD Zero
+Clause License (0BSD). The complete upstream license is reproduced below.
+[Project](https://tukaani.org/xz/java.html),
+[version 1.12 license](https://github.com/tukaani-project/xz-java/blob/v1.12/COPYING).
+
+```text
+Copyright (C) The XZ for Java authors and contributors
+
+Permission to use, copy, modify, and/or distribute this
+software for any purpose with or without fee is hereby granted.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL
+WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL
+THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR
+CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+```

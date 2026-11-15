@@ -60,6 +60,7 @@ public final class MainActivity extends Activity {
     private volatile boolean nativeReady;
     private volatile boolean actionPending;
     private volatile boolean engineFailed;
+    private volatile boolean bundledMode;
     private volatile Mode mode = Mode.TITLE;
     private volatile String message = "选择游戏目录，导入 data*.ykc 和 Save";
     private volatile File saveDirectory;
@@ -85,10 +86,38 @@ public final class MainActivity extends Activity {
                 try { NativeBridge.command(session, operation, argument); }
                 catch (RuntimeException error) { showError(error); }
             });
-            String path = preferences.getString("game", "");
-            if (!path.isEmpty() && new File(path).isDirectory()) openGame(new File(path));
+            try {
+                bundledMode = BundledGame.available(getAssets());
+                if (bundledMode) prepareBundledGame();
+                else {
+                    String path = preferences.getString("game", "");
+                    if (!path.isEmpty() && new File(path).isDirectory()) openGame(new File(path));
+                }
+            } catch (IOException error) { showError(error); }
             engine.post(frame);
         });
+    }
+
+    private void prepareBundledGame() {
+        busy = true;
+        progress("正在检查随包游戏资源");
+        try {
+            BundledGame.Bundle bundle = BundledGame.read(getAssets());
+            File directory = BundledGame.prepare(getAssets(), bundle, getFilesDir(), new GameImporter.Progress() {
+                public void update(String text) { progress(text); }
+                public boolean cancelled() { return destroyed; }
+            });
+            if (destroyed) return;
+            preferences.edit().putString("label." + directory.getName(), bundle.name).apply();
+            openGame(directory);
+        } catch (Exception error) { showError(error); }
+        finally { busy = false; gameView.postInvalidate(); }
+    }
+
+    private void retryBundledGame() {
+        if (busy || destroyed) return;
+        busy = true;
+        engine.post(this::prepareBundledGame);
     }
 
     private final Runnable frame = new Runnable() {
@@ -485,13 +514,17 @@ public final class MainActivity extends Activity {
             rect(canvas, 0, 0, WIDTH, HEIGHT, 0x8806101e);
             boolean canSave = state.optBoolean("can_save") && !busy && !engineFailed;
             if (mode == Mode.TITLE) {
-                add(canvas, "开始游戏", 210, 230, 380, 42, nativeReady, MainActivity.this::begin);
+                if (bundledMode && !nativeReady)
+                    add(canvas, "重试准备游戏", 210, 230, 380, 42, true, MainActivity.this::retryBundledGame);
+                else add(canvas, "开始游戏", 210, 230, 380, 42, nativeReady, MainActivity.this::begin);
                 File[] available = saveFiles;
                 add(canvas, "继续上次存档", 210, 278, 380, 42, nativeReady && available.length > 0, () -> load(available[0]));
                 add(canvas, "读取存档", 210, 326, 380, 42, nativeReady, MainActivity.this::loadMenu);
-                add(canvas, "导入游戏文件夹", 210, 374, 380, 42, true, MainActivity.this::pickGame);
-                add(canvas, "切换已导入游戏", 210, 422, 380, 42, true, MainActivity.this::installedGames);
-                add(canvas, "退出", 210, 470, 380, 42, true, MainActivity.this::finish);
+                if (!bundledMode) {
+                    add(canvas, "导入游戏文件夹", 210, 374, 380, 42, true, MainActivity.this::pickGame);
+                    add(canvas, "切换已导入游戏", 210, 422, 380, 42, true, MainActivity.this::installedGames);
+                }
+                add(canvas, "退出", 210, bundledMode ? 374 : 470, 380, 42, true, MainActivity.this::finish);
             } else {
                 boolean hasQuickSave = false;
                 for (File file : saveFiles) if (file.getName().equals("savedata.099")) hasQuickSave = true;

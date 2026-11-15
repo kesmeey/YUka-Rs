@@ -11,7 +11,9 @@ param(
     [string]$Serial = '',
     [string]$JavaHome = $env:JAVA_HOME,
     [string]$Keystore = '',
-    [ValidateSet('SmokeInstrumentation', 'AudioFocusInstrumentation')][string]$Runner = 'SmokeInstrumentation',
+    [string]$TargetPackage = 'org.yukars.player',
+    [string]$XzJar = (Join-Path $PSScriptRoot '../target/android-libs/xz-1.12.jar'),
+    [ValidateSet('SmokeInstrumentation', 'AudioFocusInstrumentation', 'BundledGameInstrumentation')][string]$Runner = 'SmokeInstrumentation',
     [switch]$BuildOnly
 )
 $ErrorActionPreference = 'Stop'
@@ -19,7 +21,7 @@ $project = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $output = Join-Path $project ('target/android-tests/run-' + [Guid]::NewGuid().ToString('N'))
 $platformJar = Join-Path $SdkPlatform 'android.jar'
 if (-not $Keystore) { $Keystore = Join-Path $project 'bin/android-development.jks' }
-foreach ($required in @($Apk, $platformJar, $Keystore, "$BuildTools/aapt2.exe", "$BuildTools/d8.bat", "$JavaHome/bin/javac.exe")) {
+foreach ($required in @($Apk, $platformJar, $Keystore, $XzJar, "$BuildTools/aapt2.exe", "$BuildTools/d8.bat", "$JavaHome/bin/javac.exe")) {
     if (-not (Test-Path -LiteralPath $required)) { throw "Missing test input $required" }
 }
 function Invoke-Checked([string]$Program, [string[]]$Arguments) {
@@ -45,12 +47,12 @@ $env:JAVA_HOME = $JavaHome
 $env:PATH = "$JavaHome/bin;$env:PATH"
 $apiSources = @(Get-ChildItem -LiteralPath "$PSScriptRoot/app/src/main/java" -Recurse -Filter '*.java' | Select-Object -ExpandProperty FullName)
 $testSources = @(Get-ChildItem -LiteralPath "$PSScriptRoot/tests/src" -Recurse -Filter '*.java' | Select-Object -ExpandProperty FullName)
-Invoke-Checked "$JavaHome/bin/javac.exe" (@('-encoding', 'UTF-8', '--release', '8', '-Xlint:all', '-Werror', '-classpath', $platformJar, '-d', "$output/api") + $apiSources)
+Invoke-Checked "$JavaHome/bin/javac.exe" (@('-encoding', 'UTF-8', '--release', '8', '-Xlint:all', '-Werror', '-classpath', "$platformJar;$XzJar", '-d', "$output/api") + $apiSources)
 Write-ClassJar "$output/api" "$output/api.jar"
-Invoke-Checked "$JavaHome/bin/javac.exe" (@('-encoding', 'UTF-8', '--release', '8', '-Xlint:all', '-Werror', '-classpath', "$platformJar;$output/api", '-d', "$output/classes") + $testSources)
+Invoke-Checked "$JavaHome/bin/javac.exe" (@('-encoding', 'UTF-8', '--release', '8', '-Xlint:all', '-Werror', '-classpath', "$platformJar;$XzJar;$output/api", '-d', "$output/classes") + $testSources)
 Write-ClassJar "$output/classes" "$output/tests.jar"
-Invoke-Checked "$BuildTools/d8.bat" @('--release', '--min-api', '26', '--lib', $platformJar, '--classpath', "$output/api.jar", '--output', "$output/dex", "$output/tests.jar")
-Invoke-Checked "$BuildTools/aapt2.exe" @('link', '--manifest', "$PSScriptRoot/tests/AndroidManifest.xml", '-I', $platformJar, '--min-sdk-version', '26', '--target-sdk-version', '35', '-o', "$output/unsigned.apk")
+Invoke-Checked "$BuildTools/d8.bat" @('--release', '--min-api', '26', '--lib', $platformJar, '--classpath', "$output/api.jar", '--classpath', $XzJar, '--output', "$output/dex", "$output/tests.jar")
+Invoke-Checked "$BuildTools/aapt2.exe" @('link', '--manifest', "$PSScriptRoot/tests/AndroidManifest.xml", '--rename-instrumentation-target-package', $TargetPackage, '-I', $platformJar, '--min-sdk-version', '26', '--target-sdk-version', '35', '-o', "$output/unsigned.apk")
 $archive = [IO.Compression.ZipFile]::Open("$output/unsigned.apk", [IO.Compression.ZipArchiveMode]::Update)
 try {
     foreach ($dex in (Get-ChildItem -LiteralPath "$output/dex" -Filter '*.dex')) {

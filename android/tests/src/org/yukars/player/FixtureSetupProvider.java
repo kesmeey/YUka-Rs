@@ -20,6 +20,8 @@ public final class FixtureSetupProvider extends ContentProvider {
 
     @Override public Bundle call(String method, String argument, Bundle extras) {
         if (!method.equals("new_fixture")) throw new IllegalArgumentException("Unknown fixture operation");
+        String targetPackage = getCallingPackage();
+        if (targetPackage == null) throw new SecurityException("Fixture caller is unavailable");
         long identity = Binder.clearCallingIdentity();
         try {
             String name = "saf-" + UUID.randomUUID();
@@ -36,7 +38,7 @@ public final class FixtureSetupProvider extends ContentProvider {
                     .putBoolean("duplicate_archive", "duplicate".equals(argument)).commit())
                 throw new IOException("Cannot publish test fixture directory");
             for (String id : new String[]{"root/input", "root/output"})
-                getContext().grantUriPermission("org.yukars.player",
+                getContext().grantUriPermission(targetPackage,
                     DocumentsContract.buildTreeDocumentUri(FixtureDocumentsProvider.AUTHORITY, id),
                     Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
             return new Bundle();

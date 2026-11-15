@@ -12,4 +12,6 @@
         android:targetPackage="org.yukars.player" android:label="Yuka RS native playback smoke" />
     <instrumentation android:name="org.yukars.player.AudioFocusInstrumentation"
         android:targetPackage="org.yukars.player" android:label="Yuka RS foreground audio focus" />
+    <instrumentation android:name="org.yukars.player.BundledGameInstrumentation"
+        android:targetPackage="org.yukars.player" android:label="Yuka RS bundled resource installation" />
 </manifest>
