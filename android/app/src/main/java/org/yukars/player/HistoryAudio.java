@@ -19,6 +19,7 @@ final class HistoryAudio {
     private final AudioFocusRequest focus;
     private MediaPlayer player;
     private boolean ownsFocus;
+    private float volume = 0.65f;
 
     HistoryAudio(Context context) {
         manager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
@@ -31,7 +32,12 @@ final class HistoryAudio {
     }
 
     void play(JSONArray paths) {
+        play(paths, 0.65f);
+    }
+
+    void play(JSONArray paths, float gain) {
         stop();
+        volume = Math.max(0, Math.min(1, gain));
         for (int index = 0; index < paths.length(); index++) queue.add(new File(paths.optString(index)));
         if (queue.isEmpty()) return;
         ownsFocus = manager.requestAudioFocus(focus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
@@ -52,6 +58,7 @@ final class HistoryAudio {
             candidate.setOnCompletionListener(value -> next());
             candidate.setOnErrorListener((value, what, extra) -> { stop(); return true; });
             try (FileInputStream input = new FileInputStream(source)) { candidate.setDataSource(input.getFD()); }
+            candidate.setVolume(volume, volume);
             candidate.prepareAsync();
         } catch (Exception error) { stop(); }
         finally { source.delete(); }

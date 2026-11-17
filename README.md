@@ -8,9 +8,9 @@
 
 ## 《情侣热恋中》完整游戏 APK
 
-`bin/Loverable-Yuka-Rs-0.2.3.apk` 将 Rust 引擎与本机汉化版的五个原始 `data*.ykc` 资源包一起打包。
+`bin/Loverable-Yuka-Rs-0.2.4.apk` 将 Rust 引擎、本机汉化版的五个原始 `data*.ykc` 与适配 Android 的 OP 视频一起打包。
 应用包名为 `org.yukars.loverable`，最低版本为 Android 8.0，包含 `arm64-v8a` 和 `x86_64`。
-APK 约 2.93 GiB，使用开发签名，构建后校验 APK 签名和 16 KiB 对齐。
+APK 约 2.97 GiB，使用开发签名，构建后校验 APK 签名和 16 KiB 对齐。
 资源采用 XZ preset 3 无损压缩，由 release 模式 Rust 解码器流式解压，替代旧版的纯 Java 解码。
 首次启动会显示解包进度、速度与估计剩余时间，将资源流式恢复到应用私有目录并核对原文件的
 长度及 SHA-256，完成后进入游戏标题。后续启动复用已完成的资源，解包中断后可重新打开应用继续准备。
@@ -32,21 +32,32 @@ APK 约 2.93 GiB，使用开发签名，构建后校验 APK 签名和 16 KiB 对
 保存当前会话最近500条，开始新游戏或读档后重置，不改变原版存档文件结构。
 完整游戏 APK 的图标从原版 `Loverable_cn.exe` 提取。
 
-原版画面/文本/声音/语音设置与鉴赏仍待实现。
-选项入口当前打开安卓导入导出工具，安卓返回键打开宿主暂停菜单。
-字体采用 Android 系统字体，窗口采用原版启动默认70%不透明度，菜单动画使用序列首帧，
-`selectM` 的特殊字号仍使用普通选择项字号。上述差异尚需继续对照 PC 实现。
+0.2.4 将右侧四个设置入口接到原版八页：画面、文本两页、声音、语音四页。所有单选、滑块、
+静音和试听按钮都生效，设置写入原版 `System.dat`，旧剧情读档不覆盖当前设置。
+支持逐字显示/点击显示全文、字体与描边/阴影、自动速度、快进范围、选择后继续、点击中断语音、
+透明度、各类音量、逐角色音量与语音期间降低BGM。快进按钮按设置直接启用，长按可切换范围。
+安卓返回键和外接鼠标右键按设置打开选项或隐藏文本；全屏/窗口对应 Android 系统栏显隐。
+字体用 Android 的黑体/宋体家族替代，普通转场质量和BGM自动降低的幅度仍有宿主近似，见
+`docs/android-settings.md`。菜单动画使用序列首帧，`selectM` 的特殊字号仍需进一步逐帧对照。
+
+标题包含原版姓名输入、随机标题语音和BGM。附加内容支持80组CG及其差分、20段回想、29首BGM，
+按原版全局进度解锁，不会自动解锁。回想执行原脚本，结束后返回鉴赏，回想中禁用手动存档。
+设置右上角的“安卓工具”提供单档导入、完整 PC Save 目录导入/备份/导出与独立 OP 播放。
+原版 `savedata.000` 记录上一个选择点，菜单可返回重选。
+
+OP 源文件为游戏外置 `avi/lave_op.mpg`，构建时转为800×600 H.264/AAC，原文件不修改。
+MP4直接通过 APK 文件描述符播放，无需首次解压；支持暂停/恢复、跳过和自然结束，剧情等待真实播放完成。
 
 设备首次解包后的五个 YKC 文件 SHA-256 均与 PC 原包一致。完整 APK 已通过标题与新游戏点击、
 快速存读档、后台自动保存后重启继续、PC 原档与回存档读取续行、选择支两个分支恢复及音频焦点回归。
-资源准备中断后的恢复和已完成资源的复用也已检查。应用与展开资源合计约占 7.56 GB，另存的 APK 文件占用额外空间。
+资源准备中断后的恢复和已完成资源的复用也已检查。应用与展开资源合计约占 7.60 GB，另存的 APK 文件占用额外空间。
 ARM64 当前完成交叉编译，实机运行、扬声器输出和完整路线的逐帧音画对照仍待验证。
 OP 视频及特效边界见下方“当前演示边界”。
 
 ### 构建完整游戏 APK
 
 以下命令在项目根目录的 PowerShell 7 中执行。资源准备需要 Python 3，EXE 图标提取需要 pefile 和 Pillow，Android 构建需要 SDK Platform、
-Build Tools、NDK、Java 工具链及 XZ for Java 1.12。构建脚本默认读取
+Build Tools、NDK、Java 工具链及 XZ for Java 1.12。OP转换还需FFmpeg（也可使用 imageio-ffmpeg 提供的可执行文件）。构建脚本默认读取
 `target/android-libs/xz-1.12.jar`，也可通过 `-XzJar` 指定位置。依赖采用 0BSD 许可证。
 [XZ for Java](https://tukaani.org/xz/java.html)
 
@@ -56,6 +67,7 @@ curl.exe --fail --location 'https://repo.maven.apache.org/maven2/org/tukaani/xz/
 
 $game = 'D:\gal\love loabe\【PC】情侣热恋中\情侣热恋中（ラブラブル)'
 python .\android\prepare-game.py $game .\target\bundled-loverable\assets
+python .\android\prepare-video.py $game .\target\bundled-loverable\assets
 .\android\build.ps1 `
     -SdkPlatform .\target\android-sdk\android-35 `
     -BuildTools .\target\android-sdk\android-15 `
@@ -98,11 +110,11 @@ python .\android\prepare-game.py $game .\target\bundled-loverable\assets
 ## Android 与原版存档
 
 Android 宿主使用 Java 触摸界面、MediaPlayer 音频输出和 Rust JNI，最低版本为 Android 8.0。
-通用播放器构建包含 `arm64-v8a` 和 `x86_64` 两种 ABI，当前产物路径为 `bin/Yuka-Rs-0.2.3.apk`。
+通用播放器构建包含 `arm64-v8a` 和 `x86_64` 两种 ABI，当前产物路径为 `bin/Yuka-Rs-0.2.4.apk`。
 构建脚本为 `android/build.ps1`，需要传入 SDK Platform、Build Tools、NDK 和 Java 工具链目录。
 
 通用播放器安装后从“选项设置”中的安卓工具选择“导入游戏文件夹”，选中包含 `data*.ykc` 的游戏目录。
-导入器把资源和已有 `Save` 目录复制到应用私有存储，并在文档提供者支持时保留文件修改时间。
+导入器把资源、已有 `Save` 和可选 `movies/*.mp4` 复制到应用私有存储，并在文档提供者支持时保留文件修改时间。
 标题的“继续游戏”打开原版读档页。触摸推进对白，选择支直接点选，返回键打开暂停菜单。
 暂停菜单可存读档，并可通过“导出完整存档目录”导出供 PC 使用的存档文件。
 
@@ -188,12 +200,13 @@ $game = 'D:\gal\love loabe\【PC】情侣热恋中\情侣热恋中（ラブラ�
 
 ### 当前演示边界
 
-Windows 消息框为自绘布局，Android 界面采用上文所述原图布局。正文即时显示，字体效果统一。
+Windows 消息框为自绘布局，Android 界面采用上文所述原图布局，正文按设置逐字显示，字体效果可调整。
 普通转场与蒙版转场使用交叉淡化，
-`Effect` 屏幕震动暂未实现。文字框移动、背景滚动和音频异步淡出已有实现。
-剧情音频使用 65% 主音量，再乘脚本设置的局部音量。设备不可用时显示静音状态。
+`Effect` 的1/5模式使用逆向确认的纵向/二维震动轨迹。文字框移动、背景滚动和音频异步淡出已有实现。
+剧情音频按所选声音组和脚本局部音量相乘。设备不可用时显示静音状态。
 
-`MoviePlay` 当前跳过 OP 视频并记录到报告。原版设置/鉴赏菜单和其他作品验证仍待实现。
+Windows/headless 的 `MoviePlay` 仍跳过并记录到报告，Android 使用上述真实视频播放。
+其他作品验证仍待扩展；当前设置和鉴赏实现针对本机这份《情侣热恋中》汉化版。
 Windows JSON 存档中的变量状态随该存档恢复，Android 原格式存档将全局变量和已读记录单独持久化。
 执行报告中的 `approximations` 记录本次路径使用到的效果近似。
 
@@ -209,7 +222,7 @@ Windows JSON 存档中的变量状态随该存档恢复，Android 原格式存�
 | 原生逆向 | Windows API 依赖、命令注册表、关键分发器与处理函数地址 | 339 个注册项，脚本引用的 142 个函数名全部匹配 |
 
 100 页演示执行 1,264 步，加载 5 个脚本，解码 26 次图像资源和 56 次音频资源。
-发布版构建、56 项默认测试（50 项 library 测试和 6 项原格式 codec 测试）、6 项 Windows JSON 存档回归、
+发布版构建、61 项默认测试（55 项 library 测试和 6 项原格式 codec 测试）、6 项 Windows JSON 存档回归、
 4 项原格式 runtime 回归、1 项原档 codec 实数据回归、`cargo fmt --check` 和 Clippy 零警告检查通过。
 另有一项依赖本地全部游戏图像的测试，默认忽略，初始格式验证阶段已单独运行通过。
 音频计数表示建立解码器并确认首批样本，实际播放由音频线程继续解码。

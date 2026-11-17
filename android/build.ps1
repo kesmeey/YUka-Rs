@@ -56,7 +56,26 @@ if ($bundled) {
         if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ne $file.encodedSha256) { throw "Bundle checksum mismatch $source" }
         $bundleFiles += [PSCustomObject]@{Source=$source; Entry=('assets/' + $file.asset); Compression=[IO.Compression.CompressionLevel]::NoCompression}
     }
-    $payloadBytes = ($bundle.files | Measure-Object -Property encodedSize -Sum).Sum
+    $movieBytes = 0L
+    $movieManifestPath = Join-Path $BundleDirectory 'movies.json'
+    if (Test-Path -LiteralPath $movieManifestPath) {
+        $movieManifest = Get-Content -LiteralPath $movieManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($movieManifest.version -ne 1 -or @($movieManifest.movies).Count -gt 100) { throw 'Invalid movie manifest' }
+        $movieNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        $bundleFiles += [PSCustomObject]@{Source=$movieManifestPath; Entry='assets/movies.json'; Compression=[IO.Compression.CompressionLevel]::Optimal}
+        foreach ($movie in $movieManifest.movies) {
+            if ($movie.asset -notmatch '^movies/[A-Za-z0-9_-]+\.mp4$' -or $movie.encodedSize -le 0 -or $movie.encodedSha256 -notmatch '^[0-9a-f]{64}$' -or $movie.sourceSha256 -notmatch '^[0-9a-f]{64}$' -or -not $movieNames.Add($movie.asset)) {
+                throw 'Movie assets must have unique MP4 paths and verified source/output hashes'
+            }
+            $movieSource = Join-Path $BundleDirectory $movie.asset
+            if ((Get-Item -LiteralPath $movieSource).Length -ne $movie.encodedSize) { throw "Movie length mismatch $movieSource" }
+            if ((Get-FileHash -LiteralPath $movieSource -Algorithm SHA256).Hash -ne $movie.encodedSha256) { throw "Movie checksum mismatch $movieSource" }
+            # STORED entries let MediaPlayer seek the APK directly via AssetManager.openFd.
+            $bundleFiles += [PSCustomObject]@{Source=$movieSource; Entry=('assets/' + $movie.asset); Compression=[IO.Compression.CompressionLevel]::NoCompression}
+            $movieBytes += [long]$movie.encodedSize
+        }
+    }
+    $payloadBytes = ($bundle.files | Measure-Object -Property encodedSize -Sum).Sum + $movieBytes
     if ($payloadBytes -gt 0xffffffffL - 32MB) { throw 'Compressed game exceeds the ZIP32 APK size budget' }
     [xml]$manifestXml = Get-Content -LiteralPath $manifest -Raw -Encoding UTF8
     $manifestXml.manifest.SetAttribute('package', 'org.yukars.loverable')
@@ -131,7 +150,7 @@ try {
         Invoke-Checked "$JavaHome/bin/keytool.exe" @('-genkeypair', '-keystore', $keystore, '-storepass', 'android', '-keypass', 'android', '-alias', 'yuka-rs', '-keyalg', 'RSA', '-keysize', '2048', '-validity', '10000', '-dname', 'CN=Yuka-Rs Development', '-noprompt')
     }
     Invoke-Checked "$BuildTools/zipalign.exe" @('-f', '-P', '16', '4', "$output/unsigned.apk", "$output/aligned.apk")
-    $apkName = if ($bundled) { 'Loverable-Yuka-Rs-0.2.3.apk' } else { 'Yuka-Rs-0.2.3.apk' }
+    $apkName = if ($bundled) { 'Loverable-Yuka-Rs-0.2.4.apk' } else { 'Yuka-Rs-0.2.4.apk' }
     $apk = Join-Path $delivery $apkName
     Invoke-Checked "$BuildTools/apksigner.bat" @('sign', '--ks', $keystore, '--ks-key-alias', 'yuka-rs', '--ks-pass', 'pass:android', '--key-pass', 'pass:android', '--out', $apk, "$output/aligned.apk")
     Invoke-Checked "$BuildTools/apksigner.bat" @('verify', '--verbose', $apk)

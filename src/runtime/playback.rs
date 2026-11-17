@@ -46,6 +46,8 @@ pub(super) struct Playback {
     history: VecDeque<DialogueEntry>,
     revision: u64,
     next_id: u64,
+    page_started: Instant,
+    text_revealed: bool,
 }
 
 impl Default for Playback {
@@ -59,6 +61,8 @@ impl Default for Playback {
             history: VecDeque::new(),
             revision: 0,
             next_id: 0,
+            page_started: Instant::now(),
+            text_revealed: false,
         }
     }
 }
@@ -122,7 +126,7 @@ fn auto_delay(chars: usize) -> Duration {
 }
 
 #[cfg(any(target_os = "android", test))]
-fn cache_history_voice(directory: &Path, id: u64, bytes: &[u8]) -> Result<PathBuf> {
+pub(super) fn cache_history_voice(directory: &Path, id: u64, bytes: &[u8]) -> Result<PathBuf> {
     use std::{
         fs::OpenOptions,
         io::Write,
@@ -165,6 +169,9 @@ impl Runtime {
         };
         self.playback
             .set_mode(mode, Instant::now(), self.scene.dialogue.chars().count());
+        if mode == PlaybackMode::Auto {
+            self.playback.due = Some(Instant::now() + self.configured_auto_delay());
+        }
         Ok(())
     }
 
@@ -181,7 +188,46 @@ impl Runtime {
     }
 
     pub fn voice_playing(&self) -> bool {
-        (10..=21).any(|slot| self.sound.is_playing(slot))
+        (10..=21).any(|slot| self.sound.is_audible(slot))
+    }
+
+    pub fn visible_chars(&self) -> usize {
+        let chars = self.scene.dialogue.chars().count();
+        let speed = self.global_flag(4).clamp(0, 66) as u128;
+        if self.fast_execution() || self.playback.text_revealed || speed == 0 {
+            return chars;
+        }
+        let now = self.paused_at.unwrap_or_else(Instant::now);
+        let elapsed = now
+            .saturating_duration_since(self.playback.page_started)
+            .as_millis();
+        usize::try_from(elapsed / speed)
+            .unwrap_or(usize::MAX)
+            .min(chars)
+    }
+
+    pub fn text_complete(&self) -> bool {
+        self.visible_chars() >= self.scene.dialogue.chars().count()
+    }
+
+    pub fn reveal_text(&mut self) {
+        self.playback.text_revealed = true;
+    }
+
+    pub fn stop_current_voice(&mut self) {
+        for slot in 10..=21 {
+            self.sound.stop(slot);
+        }
+    }
+
+    fn configured_auto_delay(&self) -> Duration {
+        let speed = self.global_flag(5).clamp(0, 6600) as u64;
+        let chars = if speed == 0 {
+            0
+        } else {
+            self.scene.dialogue.chars().count().min(10000) as u64
+        };
+        Duration::from_millis(speed + chars * 50)
     }
 
     pub fn history(&self) -> &VecDeque<DialogueEntry> {
@@ -198,6 +244,8 @@ impl Runtime {
     }
 
     pub(super) fn record_dialogue(&mut self) {
+        self.playback.page_started = Instant::now();
+        self.playback.text_revealed = false;
         self.playback.record(
             &self.scene.speaker,
             &self.scene.dialogue,
@@ -208,9 +256,13 @@ impl Runtime {
             Instant::now(),
             self.scene.dialogue.chars().count(),
         );
+        if self.playback.mode == PlaybackMode::Auto {
+            self.playback.due = Some(Instant::now() + self.configured_auto_delay());
+        }
     }
 
     pub(super) fn shift_playback_time(&mut self, elapsed: Duration) {
+        self.playback.page_started += elapsed;
         if let Some(due) = &mut self.playback.due {
             *due += elapsed;
         }
@@ -236,19 +288,9 @@ impl Runtime {
 
     pub(super) fn reset_script_playback(&mut self) -> Result<()> {
         self.set_playback_mode("manual")?;
-        // Choice setup snapshots modes in Flag261..263, but this host deliberately
-        // requires a fresh user action after a choice rather than auto-selecting.
-        for activation in &mut self.stack {
-            for id in 261..=263 {
-                activation.vm.set_variable(
-                    Slot::IntegerVariable {
-                        bank: "Flag".into(),
-                        id,
-                    },
-                    Value::Integer(0),
-                )?;
-            }
-        }
+        // selectA snapshots modes before stopping them. Its FC_RETURN honors
+        // GlobalFlag12/13 and calls setNowMode after the user selects a branch.
+        // Keep those snapshots so both "continue after choice" settings work.
         Ok(())
     }
 
@@ -272,7 +314,10 @@ impl Runtime {
                 self.drive()?;
             }
         }
-        if self.waiting_key() && self.playback.ready(Instant::now(), self.voice_playing()) {
+        if self.waiting_key()
+            && (self.playback.mode != PlaybackMode::Auto || self.text_complete())
+            && self.playback.ready(Instant::now(), self.voice_playing())
+        {
             // Voices from the old page must not overlap fast-forwarded text.
             if self.playback.mode.skips() {
                 for slot in 10..=21 {

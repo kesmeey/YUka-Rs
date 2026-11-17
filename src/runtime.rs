@@ -17,27 +17,34 @@ use std::{
 pub const DEFAULT_SCRIPT: &str = "yks\\story\\common\\PROLOGUE1.YKS";
 pub const PLAY_SCRIPT: &str = "yks\\root\\root_Common.yks";
 
+mod extras;
 mod graphics_host;
+mod movie;
 mod native_globals;
 mod native_persistence;
 mod native_thumbnail;
 mod persistence;
 mod playback;
+mod settings;
 mod ui;
 use graphics_host::GraphicsEffects;
+pub use movie::MovieRequest;
 pub use playback::{DialogueEntry, PlaybackMode};
+pub use settings::{PlayerName, Settings};
 pub use ui::SaveInfo;
 
 struct Activation {
     name: String,
     vm: Vm,
 }
+#[derive(Clone, Copy)]
 enum Waiting {
     Ready,
     Key,
     Timer(Instant),
     Sound(i32),
     Choice,
+    Movie,
 }
 struct Scroll {
     slot: i32,
@@ -96,7 +103,7 @@ pub struct Runtime {
     native_selection: native_persistence::NativeSelection,
     native_selection_visibility: BTreeMap<i32, bool>,
     save_directory: Option<PathBuf>,
-    autosave_requested: bool,
+    autosave_requested: Option<i32>,
     random_state: u64,
     effects: GraphicsEffects,
     timers: BTreeMap<i32, Instant>,
@@ -104,6 +111,10 @@ pub struct Runtime {
     native_globals: native_globals::NativeGlobals,
     native_template: Option<crate::native_save::NativeSave>,
     playback: playback::Playback,
+    movie: Option<MovieRequest>,
+    movie_volume: i32,
+    keywait_icon: bool,
+    submenu_enabled: bool,
 }
 
 fn int(arguments: &[Value], index: usize) -> Result<i32> {
@@ -189,7 +200,7 @@ impl Runtime {
                 text_value(name),
             )?;
         }
-        let runtime = Self {
+        let mut runtime = Self {
             scene: Scene::default(),
             resources,
             sound: Sound::new(muted),
@@ -219,7 +230,7 @@ impl Runtime {
             native_selection: native_persistence::NativeSelection::default(),
             native_selection_visibility: BTreeMap::new(),
             save_directory: None,
-            autosave_requested: false,
+            autosave_requested: None,
             random_state: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -231,7 +242,13 @@ impl Runtime {
             native_globals: native_globals::NativeGlobals::default(),
             native_template: None,
             playback: playback::Playback::default(),
+            movie: None,
+            movie_volume: 1000,
+            keywait_icon: true,
+            submenu_enabled: true,
         };
+        runtime.initialize_options()?;
+        runtime.initialize_player_name()?;
         Ok(runtime)
     }
 
@@ -290,13 +307,14 @@ impl Runtime {
     }
 
     pub fn tick(&mut self) -> Result<bool> {
+        // Menu/title audio can run independently while the script VM is paused.
+        self.sound.tick();
         if self.paused_at.is_some() {
             return Ok(false);
         }
         if self.scene.finished {
             return Ok(false);
         }
-        self.sound.tick();
         let now = Instant::now();
         let mut changed = self.effects.tick(&mut self.scene);
         for scroll in &self.scrolls {
@@ -332,6 +350,12 @@ impl Runtime {
             self.drive()?;
             changed = true;
         }
+        if self.autosave_requested.is_some() && self.can_save() {
+            // A choice may become stable only after its entry animation/fade.
+            // Publish the previous-choice slot before the user selects a branch.
+            self.drive()?;
+            changed = true;
+        }
         changed |= self.tick_playback()?;
         Ok(changed)
     }
@@ -358,16 +382,26 @@ impl Runtime {
                     self.set_playback_mode("manual")?;
                 }
                 self.status();
-                if self.autosave_requested
+                if let Some(slot) = self.autosave_requested
                     && self.can_save()
                     && let Some(directory) = &self.save_directory
                 {
                     #[cfg(target_os = "android")]
-                    let result = self
-                        .save_native_with_comment(&directory.join("savedata.001"), "[AUTO SAVE]");
+                    let result = self.save_native_with_comment(
+                        &directory.join(format!("savedata.{slot:03}")),
+                        if slot == 0 {
+                            "[PREVIOUS CHOICE]"
+                        } else {
+                            "[AUTO SAVE]"
+                        },
+                    );
                     #[cfg(not(target_os = "android"))]
-                    let result = self.save(&directory.join("auto.json"));
-                    self.autosave_requested = false;
+                    let result = self.save(&directory.join(if slot == 0 {
+                        "previous-choice.json"
+                    } else {
+                        "auto.json"
+                    }));
+                    self.autosave_requested = None;
                     if let Err(error) = result {
                         self.scene.status = format!("自动存档失败 · {error}");
                     }
@@ -405,6 +439,7 @@ impl Runtime {
                     *self.commands.entry(function.clone()).or_default() += 1;
                     if function == "Select" {
                         self.set_playback_mode("manual")?;
+                        self.autosave_requested = Some(0);
                         self.scene.choices = self
                             .stack
                             .last()
@@ -445,6 +480,16 @@ impl Runtime {
                         {
                             self.scene.finished = true;
                             self.end_reason = Some("return_to_title".into());
+                            self.sound.stop_all();
+                            continue;
+                        }
+                        if function == "ScriptJump"
+                            && name
+                                .replace('\\', "/")
+                                .eq_ignore_ascii_case("yks/extra/cg_main.yks")
+                        {
+                            self.scene.finished = true;
+                            self.end_reason = Some("return_to_extras".into());
                             self.sound.stop_all();
                             continue;
                         }
@@ -489,6 +534,11 @@ impl Runtime {
     }
 
     fn transition(&mut self, milliseconds: i32) {
+        let milliseconds = match self.global_flag(10) {
+            0 => milliseconds.min(100),
+            2 => 0,
+            _ => milliseconds,
+        };
         if !self.fast_execution() && milliseconds > 0 {
             self.scene.transition_from = self.draw_before.take();
             self.scene.transition_progress = 0.0;
@@ -506,13 +556,14 @@ impl Runtime {
 
     fn host(&mut self, function: &str, args: &[Value]) -> Result<Option<Value>> {
         let fast = self.fast_execution();
+        let graphics_fast = fast || self.global_flag(10) == 2;
         if self.effects.handle(
             function,
             args,
             &mut self.scene,
             &mut self.resources,
             &mut self.layer_sources,
-            fast,
+            graphics_fast,
         )? {
             return Ok(None);
         }
@@ -521,7 +572,26 @@ impl Runtime {
             "WindowNameSet" => {
                 self.window_title = string(args, 0)?.to_owned();
             }
-            "SaveDataSave" => self.autosave_requested = true,
+            "SaveDataSave" => {
+                let slot = int(args, 0)?;
+                if !(0..=999).contains(&slot) {
+                    return Err("invalid native autosave slot".into());
+                }
+                self.autosave_requested = Some(slot);
+            }
+            "TextSpeedSet" => self.set_global_flag(4, int(args, 0)?.clamp(0, 66))?,
+            "AutoSpeedSet" => self.set_global_flag(5, int(args, 0)?.clamp(0, 6600))?,
+            "SoundGroupSet" => self
+                .sound
+                .group_set(int(args, 0)?, int(args, 1)?, int(args, 2)?)?,
+            "SoundGroupVolumeSet" => self.sound.group_volume(int(args, 0)?, int(args, 1)?),
+            "SoundAutoVolumeSet" => {
+                let enabled = int(args, 0)? != 0;
+                self.set_global_flag(19, i32::from(enabled))?;
+                self.sound.set_auto_duck(enabled);
+            }
+            "SoundGroupAutomodeSkipSet" | "AutoModeCharactorWaitSet" => {}
+            "DefaultKeyinSoundStopSet" => self.set_global_flag(16, int(args, 0)?.clamp(0, 1))?,
             "SystemDataWrite" | "AlreadyDataWrite" => {
                 self.flush_native_globals()?;
                 return Ok(Some(Value::Integer(1)));
@@ -584,13 +654,21 @@ impl Runtime {
                     .insert("Choice layout and text borders use the runtime menu".into());
             }
             "MovieVolumeSet" => {
-                let _ = int(args, 0)?;
+                self.movie_volume = int(args, 0)?.clamp(0, 1000);
             }
             "MoviePlay" => {
-                let _ = string(args, 0)?;
-                self.approximations
-                    .insert("Movie playback is skipped".into());
+                let resource = string(args, 0)?;
+                #[cfg(target_os = "android")]
+                self.request_movie(resource)?;
+                #[cfg(not(target_os = "android"))]
+                {
+                    let _ = resource;
+                    self.approximations
+                        .insert("Movie playback is skipped".into());
+                }
             }
+            "KeyWaitIcon" => self.keywait_icon = int(args, 0)? != 0,
+            "SubMenuEnableMode" => self.submenu_enabled = int(args, 0)? != 0,
             "LF" => self.scene.dialogue.push('\n'),
             "SkipModeCheck" | "AlreadySkipModeCheck" | "AutoModeCheck" => {
                 let expected = match function {
@@ -805,8 +883,25 @@ impl Runtime {
                     .insert("FontSet uses the demo's common Chinese font".into());
             }
             "Effect" => {
-                self.approximations
-                    .insert("Effect screen shake is omitted".into());
+                let kind = int(args, 0)?;
+                let interval = if args.len() > 1 { int(args, 1)? } else { -1 };
+                let amplitude = if args.len() > 2 { int(args, 2)? } else { 5 };
+                let options = self.global_flag(10);
+                let duration = self.effects.screen_shake(
+                    &mut self.scene,
+                    kind,
+                    interval,
+                    amplitude,
+                    fast || options == 2,
+                    options == 0,
+                )?;
+                if !duration.is_zero() {
+                    self.waiting = Waiting::Timer(Instant::now() + duration);
+                }
+                if options == 0 {
+                    self.approximations
+                        .insert("Simplified Effect uses accelerated native shake steps".into());
+                }
             }
             _ => return Err(format!("unimplemented host command {function}").into()),
         }

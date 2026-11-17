@@ -48,6 +48,8 @@ public final class ActivityControlsInstrumentation extends Instrumentation {
                 && !Boolean.TRUE.equals(field(activity, "busy")), 30000, "bundled game did not reach its title");
             require(snapshot().optBoolean("title"), "Activity did not show the title");
             tap(390, 296);
+            await(() -> Boolean.TRUE.equals(field(activity, "nameEntry")), 3000, "new game did not open original name input");
+            tap(280, 410);
             await(() -> snapshot().optBoolean("waiting_key") && snapshot().optBoolean("can_save")
                 && "PLAYING".equals(String.valueOf(field(activity, "mode"))), 30000, "new-game title button did not start dialogue");
 
@@ -60,7 +62,7 @@ public final class ActivityControlsInstrumentation extends Instrumentation {
 
             stage = "all_text_skip_dialog_and_button";
             int before = snapshot().optInt("history_count");
-            tap(780, 553);
+            hold(780, 553);
             await(() -> clickText("全部快进（包括未读对话）"), 3000, "original skip button did not expose its explicit all-text choice");
             await(() -> snapshot().optInt("history_count") >= before + 3, 10000, "all-text skip did not advance several real pages");
             tap(400, 300);
@@ -143,6 +145,21 @@ public final class ActivityControlsInstrumentation extends Instrumentation {
             try { gameView.dispatchTouchEvent(down); gameView.dispatchTouchEvent(up); }
             finally { down.recycle(); up.recycle(); }
         });
+    }
+
+    private void hold(float x, float y) throws InterruptedException {
+        long now = SystemClock.uptimeMillis();
+        runOnMainSync(() -> touch(x, y, MotionEvent.ACTION_DOWN, now));
+        Thread.sleep(700);
+        runOnMainSync(() -> touch(x, y, MotionEvent.ACTION_UP, now));
+    }
+
+    private void touch(float x, float y, int action, long downTime) {
+        float scale = Math.min(gameView.getWidth() / 800f, gameView.getHeight() / 600f);
+        MotionEvent event = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action,
+            (gameView.getWidth() - scale * 800) / 2 + x * scale,
+            (gameView.getHeight() - scale * 600) / 2 + y * scale, 0);
+        try { gameView.dispatchTouchEvent(event); } finally { event.recycle(); }
     }
 
     private boolean clickText(String text) {

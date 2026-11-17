@@ -50,6 +50,7 @@ pub struct Scene {
     pub dialogue: String,
     pub dialogue_offset: (i32, i32),
     pub speaker_offset: (i32, i32),
+    pub shake_offset: (i32, i32),
     pub dialogue_visible: bool,
     pub status: String,
     pub finished: bool,
@@ -66,6 +67,7 @@ impl Default for Scene {
             dialogue: String::new(),
             dialogue_offset: (0, 0),
             speaker_offset: (0, 0),
+            shake_offset: (0, 0),
             dialogue_visible: true,
             status: String::new(),
             finished: false,
@@ -156,7 +158,8 @@ impl Renderer {
         let line_height = usize::from(size) + 5;
         let panel_height = (lines.len() * line_height + 18).max(137);
         let panel_y = 567_i32.saturating_sub(panel_height as i32);
-        let (dialogue_x, dialogue_y) = scene.dialogue_offset;
+        let dialogue_x = scene.dialogue_offset.0 + scene.shake_offset.0;
+        let dialogue_y = scene.dialogue_offset.1 + scene.shake_offset.1;
         let dialogue_top = panel_y.saturating_add(dialogue_y);
         self.rect(
             20_i32.saturating_add(dialogue_x),
@@ -175,7 +178,8 @@ impl Renderer {
             230,
         );
         if !scene.speaker.is_empty() {
-            let (speaker_x, speaker_y) = scene.speaker_offset;
+            let speaker_x = scene.speaker_offset.0 + scene.shake_offset.0;
+            let speaker_y = scene.speaker_offset.1 + scene.shake_offset.1;
             let width = (self.text_width(&scene.speaker, 23) + 38.0).ceil() as usize;
             self.rect(
                 20_i32.saturating_add(speaker_x),
@@ -371,8 +375,26 @@ pub fn render_layers(scene: &Scene, pixels: &mut [u32], previous: &mut [u32]) {
             previous.fill(0);
             composite_layers(previous, layers);
             let alpha = (progress * 255.0).round() as u8;
-            for (current, previous) in pixels.iter_mut().zip(previous) {
+            for (current, previous) in pixels.iter_mut().zip(previous.iter()) {
                 *current = blend(*previous, *current, alpha);
+            }
+        }
+    }
+    if scene.shake_offset != (0, 0) {
+        previous.copy_from_slice(pixels);
+        pixels.fill(0);
+        let (dx, dy) = scene.shake_offset;
+        for y in 0..HEIGHT as i32 {
+            let source_y = y - dy;
+            if !(0..HEIGHT as i32).contains(&source_y) {
+                continue;
+            }
+            for x in 0..WIDTH as i32 {
+                let source_x = x - dx;
+                if (0..WIDTH as i32).contains(&source_x) {
+                    pixels[y as usize * WIDTH + x as usize] =
+                        previous[source_y as usize * WIDTH + source_x as usize];
+                }
             }
         }
     }
@@ -1027,6 +1049,40 @@ pub fn run(runtime: &mut crate::runtime::Runtime, font_path: &Path) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screen_shake_moves_composed_frame_after_filters_and_restores_without_drift() {
+        let mut scene = Scene {
+            shake_offset: (3, 2),
+            ..Scene::default()
+        };
+        scene.layers.insert(
+            0,
+            Layer {
+                image: Arc::new(RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]))),
+                x: 0,
+                y: 0,
+                opacity: 255,
+                additive_color: [0; 3],
+                source_rect: None,
+                sepia_filter: false,
+                grayscale_filter: false,
+                invert_filter: false,
+                children: BTreeMap::new(),
+                visible: true,
+            },
+        );
+        let mut pixels = vec![0; WIDTH * HEIGHT];
+        let mut scratch = pixels.clone();
+        render_layers(&scene, &mut pixels, &mut scratch);
+        assert_eq!(pixels[0], 0);
+        assert_eq!(pixels[2 * WIDTH + 3], 0xff0000);
+        assert_eq!((scene.layers[&0].x, scene.layers[&0].y), (0, 0));
+        scene.shake_offset = (0, 0);
+        render_layers(&scene, &mut pixels, &mut scratch);
+        assert_eq!(pixels[0], 0xff0000);
+        assert_eq!(pixels[2 * WIDTH + 3], 0);
+    }
 
     #[test]
     fn pointer_mapping_preserves_letterboxed_menu_coordinates() {

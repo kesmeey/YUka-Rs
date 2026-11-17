@@ -37,7 +37,7 @@ public final class FixtureSetupProvider extends ContentProvider {
             if (!getContext().getSharedPreferences("fixture", 0).edit().putString("root", name)
                     .putBoolean("duplicate_archive", "duplicate".equals(argument)).commit())
                 throw new IOException("Cannot publish test fixture directory");
-            for (String id : new String[]{"root/input", "root/output"})
+            for (String id : new String[]{"root/input", "root/input/Save", "root/output"})
                 getContext().grantUriPermission(targetPackage,
                     DocumentsContract.buildTreeDocumentUri(FixtureDocumentsProvider.AUTHORITY, id),
                     Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);

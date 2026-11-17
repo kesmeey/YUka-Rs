@@ -23,10 +23,17 @@ struct SpriteAnimation {
     frozen: bool,
 }
 
+struct ScreenShake {
+    points: Vec<(i32, i32)>,
+    interval: Duration,
+    start: Instant,
+}
+
 #[derive(Default)]
 pub(super) struct GraphicsEffects {
     opacity: BTreeMap<i32, OpacityAnimation>,
     sprites: BTreeMap<(i32, i32), SpriteAnimation>,
+    shake: Option<ScreenShake>,
 }
 
 fn opacity(value: i32) -> u8 {
@@ -93,6 +100,8 @@ fn sprite_frames(
 
 impl GraphicsEffects {
     pub(super) fn finish_transitions(&mut self, scene: &mut Scene) {
+        self.shake = None;
+        scene.shake_offset = (0, 0);
         for (slot, animation) in std::mem::take(&mut self.opacity) {
             if let Some(layer) = scene.layers.get_mut(&slot) {
                 layer.opacity = animation.to;
@@ -115,7 +124,7 @@ impl GraphicsEffects {
 
     pub(super) fn is_stable(&self) -> bool {
         // Sprite backing-layer state is transient and is not serialized yet.
-        self.opacity.is_empty() && self.sprites.is_empty()
+        self.opacity.is_empty() && self.sprites.is_empty() && self.shake.is_none()
     }
 
     pub(super) fn deadline(&self, slot: i32) -> Option<Instant> {
@@ -125,6 +134,9 @@ impl GraphicsEffects {
     }
 
     pub(super) fn shift_time(&mut self, duration: Duration) {
+        if let Some(shake) = &mut self.shake {
+            shake.start += duration;
+        }
         for animation in self.opacity.values_mut() {
             animation.start += duration;
         }
@@ -139,6 +151,16 @@ impl GraphicsEffects {
 
     fn tick_at(&mut self, scene: &mut Scene, now: Instant) -> bool {
         let mut changed = false;
+        if let Some(shake) = &self.shake {
+            let frame =
+                now.saturating_duration_since(shake.start).as_millis() / shake.interval.as_millis();
+            let offset = shake.points.get(frame as usize).copied().unwrap_or((0, 0));
+            changed |= scene.shake_offset != offset;
+            scene.shake_offset = offset;
+            if frame >= shake.points.len() as u128 {
+                self.shake = None;
+            }
+        }
         self.opacity.retain(|slot, animation| {
             let Some(layer) = scene.layers.get_mut(slot) else {
                 return false;
@@ -179,6 +201,72 @@ impl GraphicsEffects {
             true
         });
         changed
+    }
+
+    /// Trajectories and blocking step count from native 0x4183f0 / 0x418e70.
+    pub(super) fn screen_shake(
+        &mut self,
+        scene: &mut Scene,
+        kind: i32,
+        milliseconds: i32,
+        amplitude: i32,
+        fast: bool,
+        simplified: bool,
+    ) -> Result<Duration> {
+        if !matches!(kind, 1 | 5) {
+            return Err(format!("unsupported Effect screen shake mode {kind}").into());
+        }
+        if !(0..=1024).contains(&amplitude) {
+            return Err("Effect amplitude outside 0..1024".into());
+        }
+        let interval = if milliseconds < 0 {
+            if kind == 1 { 100 } else { 50 }
+        } else {
+            milliseconds.max(1)
+        };
+        let interval = if simplified {
+            (interval / if kind == 1 { 4 } else { 12 }).max(1)
+        } else {
+            interval
+        };
+        let half = amplitude / 2;
+        let quarter = half / 2;
+        let points = if kind == 1 {
+            vec![
+                (0, amplitude),
+                (0, -amplitude),
+                (0, amplitude),
+                (0, -amplitude),
+            ]
+        } else {
+            vec![
+                (-half, -half),
+                (half, -half),
+                (-half, half),
+                (half, half),
+                (-quarter, -quarter),
+                (half, half),
+                (half, -half),
+                (-half, -half),
+                (-half, quarter),
+                (0, -half),
+                (-quarter, half),
+                (half, -half),
+            ]
+        };
+        if fast || amplitude == 0 {
+            self.shake = None;
+            scene.shake_offset = (0, 0);
+            return Ok(Duration::ZERO);
+        }
+        let duration = Duration::from_millis(interval as u64 * points.len() as u64);
+        scene.shake_offset = points[0];
+        self.shake = Some(ScreenShake {
+            points,
+            interval: Duration::from_millis(interval as u64),
+            start: Instant::now(),
+        });
+        Ok(duration)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -324,6 +412,51 @@ impl GraphicsEffects {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_shake_sequences_block_reset_and_pause_without_position_drift() -> Result<()> {
+        let mut scene = Scene::default();
+        let mut effects = GraphicsEffects::default();
+        assert_eq!(
+            effects.screen_shake(&mut scene, 1, 20, 8, false, false)?,
+            Duration::from_millis(80)
+        );
+        let start = effects.shake.as_ref().unwrap().start;
+        assert_eq!(scene.shake_offset, (0, 8));
+        assert!(!effects.is_stable());
+        effects.tick_at(&mut scene, start + Duration::from_millis(20));
+        assert_eq!(scene.shake_offset, (0, -8));
+        effects.tick_at(&mut scene, start + Duration::from_millis(80));
+        assert_eq!(scene.shake_offset, (0, 0));
+        assert!(effects.is_stable());
+        assert_eq!(
+            effects.screen_shake(&mut scene, 5, 20, 8, false, false)?,
+            Duration::from_millis(240)
+        );
+        let start = effects.shake.as_ref().unwrap().start;
+        assert_eq!(scene.shake_offset, (-4, -4));
+        effects.tick_at(&mut scene, start + Duration::from_millis(80));
+        assert_eq!(scene.shake_offset, (-2, -2));
+        effects.shift_time(Duration::from_secs(1));
+        assert!(!effects.tick_at(&mut scene, start + Duration::from_millis(1080)));
+        assert_eq!(scene.shake_offset, (-2, -2));
+        effects.tick_at(&mut scene, start + Duration::from_millis(1160));
+        assert_eq!(scene.shake_offset, (-4, 2));
+        effects.finish_transitions(&mut scene);
+        assert_eq!(scene.shake_offset, (0, 0));
+        assert!(effects.is_stable());
+        assert_eq!(
+            effects.screen_shake(&mut scene, 5, 20, 8, true, false)?,
+            Duration::ZERO
+        );
+        assert_eq!(scene.shake_offset, (0, 0));
+        assert!(
+            effects
+                .screen_shake(&mut scene, 99, 20, 8, false, false)
+                .is_err()
+        );
+        Ok(())
+    }
 
     fn layer() -> Layer {
         Layer {

@@ -28,6 +28,7 @@ fn fingerprint(bytes: impl IntoIterator<Item = u8>) -> String {
 }
 
 pub struct Resources {
+    game_identity: std::sync::OnceLock<String>,
     archives: Vec<Archive>,
     members: BTreeMap<String, (usize, usize)>,
     images: BTreeMap<String, Arc<RgbaImage>>,
@@ -64,7 +65,12 @@ impl Resources {
     }
 
     pub fn game_id(&self) -> Result<String> {
-        Ok(fingerprint(serde_json::to_vec(&self.manifest())?))
+        if let Some(identity) = self.game_identity.get() {
+            return Ok(identity.clone());
+        }
+        let identity = fingerprint(serde_json::to_vec(&self.manifest())?);
+        let _ = self.game_identity.set(identity.clone());
+        Ok(identity)
     }
 
     pub fn open(directory: &Path, encoding: TextEncoding) -> Result<Self> {
@@ -101,6 +107,7 @@ impl Resources {
             archives.push(archive);
         }
         Ok(Self {
+            game_identity: std::sync::OnceLock::new(),
             archives,
             members,
             images: BTreeMap::new(),
@@ -165,6 +172,13 @@ impl Resources {
         }
         self.loaded_images += 1;
         self.images.insert(name_key, image.clone());
+        Ok(image)
+    }
+
+    /// Full-screen gallery variants must not accumulate in the story image cache.
+    pub fn temporary_image(&mut self, name: &str) -> Result<Arc<RgbaImage>> {
+        let image = self.image(name)?;
+        self.images.remove(&key(name));
         Ok(image)
     }
 }

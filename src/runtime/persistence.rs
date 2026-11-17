@@ -86,6 +86,7 @@ impl Runtime {
         )?;
         replacement.save_directory = self.save_directory.clone();
         replacement.load_native_globals()?;
+        replacement.initialize_player_name()?;
         replacement.drive()?;
         *self = replacement;
         Ok(())
@@ -393,7 +394,7 @@ impl Runtime {
         } else {
             Waiting::Choice
         };
-        self.autosave_requested = false;
+        self.autosave_requested = None;
         self.end_reason = None;
         self.paused_at = self.paused_at.map(|_| Instant::now());
         self.scrolls.clear();

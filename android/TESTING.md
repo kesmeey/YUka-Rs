@@ -4,14 +4,14 @@
 
 ## 完整游戏 APK
 
-`bin/Loverable-Yuka-Rs-0.2.3.apk` 的目标包名为 `org.yukars.loverable`。资源准备与构建命令见项目 README。
+`bin/Loverable-Yuka-Rs-0.2.4.apk` 的目标包名为 `org.yukars.loverable`。资源准备与构建命令见项目 README。
 APK 携带五个原 YKC 包的 XZ preset 3 无损压缩数据，首次启动使用 Rust 原生解码器自动流式解包并验证原文件长度与 SHA-256。
 完整资源目录为 `/data/user/0/org.yukars.loverable/files/game-bundled-loverable-cn`，其下的 `Save` 使用原版二进制格式。
 
 将 APK 复制到设备并安装后，打开“情侣热恋中”，等待资源准备完成并进入标题。ADB 安装和启动命令如下。
 
 ```powershell
-adb -s emulator-5580 install -r .\bin\Loverable-Yuka-Rs-0.2.3.apk
+adb -s emulator-5580 install -r .\bin\Loverable-Yuka-Rs-0.2.4.apk
 adb -s emulator-5580 shell am start -n org.yukars.loverable/org.yukars.player.MainActivity
 ```
 
@@ -20,7 +20,7 @@ adb -s emulator-5580 shell am start -n org.yukars.loverable/org.yukars.player.Ma
 
 ```powershell
 $bundleTest = @{
-    Apk = '.\bin\Loverable-Yuka-Rs-0.2.3.apk'
+    Apk = '.\bin\Loverable-Yuka-Rs-0.2.4.apk'
     SdkPlatform = '.\target\android-sdk\android-35'
     BuildTools = '.\target\android-sdk\android-15'
     JavaHome = 'E:\DevEco Studio\jbr'
@@ -49,6 +49,41 @@ $bundleTest = @{
 `-TargetPackage` 用于生成测试 APK 的目标包配置，测试代码的类名仍位于 `org.yukars.player`。
 `-OriginalSave` 可传入设备上目标应用 UID 可读的 PC 原版剧情档路径，扩展验证读取、再保存和继续剧情。
 完整 APK 的安装、首次启动和资源一致性实测结果记录如下。
+
+### 设置、鉴赏与视频 0.2.4
+
+最终完整APK为3,183,322,533字节，SHA-256：
+`0ACBD952FB6332EBAD4E8C59E63FDDDC17FDFE74BC643BF124B5F61C7C414C54`。
+通用APK为5,526,290字节，SHA-256：
+`006E75FD3DC25DB7CDABADB6AD99E847B417C20785B04300BEEC6B4AC496A87A`。
+versionCode5，双ABI，签名v2/v3与16KiB对齐通过。
+
+`SettingsInstrumentation` 验证77张原版设置图像和69处逐像素裁切、八页导航、确认、单选、滑块、
+静音和试听回调、原版System.dat保存与分类恢复默认，以及真实Activity的文本/语音/声音/透明度操作。
+`MovieInstrumentation` 用实际MediaPlayer和Surface验证APK内MP4文件描述符（位于大于3GB的偏移）、
+800×600解码、暂停恢复、10秒处PixelCopy帧、点击跳过防重复、接近结尾自然结束和错误回调。
+`ExtrasInstrumentation` 验证新进度锁定、独立复制的用户全CG配置解锁、CG/差分界面、BGM暂停VM播放及原脚本回想。
+全CG测试配置仅复制到独立测试会话，不会解锁应用正常游戏的进度。
+
+```powershell
+.\android\test.ps1 @bundleTest -Runner SettingsInstrumentation
+.\android\test.ps1 @bundleTest -Runner MovieInstrumentation
+.\android\test.ps1 @bundleTest -Runner ExtrasInstrumentation -FullProfile '/data/user/0/org.yukars.loverable/files/pc-input/fullCGSystem.dat'
+```
+
+双ABI包的设置、视频、鉴赏、阅读实际按钮、原PC选择档006共五套测试通过。
+其中视频新增实际MainActivity视频请求/跳过和UI操作进行中发生错误时仍释放VM等待的回归；
+完整Save导入新增SAF暂存、逐字节备份、修改时间、取消、同名槽原子发布及其他槽保留的检查。
+对应最终报告位于 `evidence/android-final-024/`。此前原型的三套测试也全部通过；截图和报告分别位于 `evidence/android-settings-024/`、
+`evidence/android-movie-024/` 和 `evidence/android-extras-024/`。
+真实OP原文件243,234,820字节，构建时转换为40,988,694字节H.264/AAC，完整2848帧及音轨解码通过，
+原文件摘要前后相同。MP4的SHA-256为`F3464226C5172508CF3CE3885477229475E517A80DBFB4CFDFA413E40BC84D86`。
+本版本还通过原版震屏1/5轨迹、完整回想结束返回鉴赏、设置/姓名/原生存档、无效全局导入无修改及
+有效PC全局导入保留原格式的真实资源回归。字体采用Android黑体/宋体家族，低画质转场时长和
+BGM降低幅度有明确的宿主近似，见 `docs/android-settings.md`。
+最新摘要对应的完整包再次通过设置整套回归；通用包从未导入游戏的状态实际打开了系统目录选择器，
+取消后没有导入或删除数据。最终报告在 `evidence/android-latest-final-024/settings/`，
+成品摘要与通用启动证明在 `evidence/android-final-024/latest-artifacts.json` 及同目录的generic证明文件。
 
 ### 阅读功能与解压优化 0.2.3
 

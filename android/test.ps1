@@ -7,13 +7,14 @@ param(
     [Parameter(Mandatory = $true)][string]$Save,
     [Parameter(Mandatory = $true)][string]$Audio,
     [string]$OriginalSave = '',
+    [string]$FullProfile = '',
     [string]$Adb = 'adb',
     [string]$Serial = '',
     [string]$JavaHome = $env:JAVA_HOME,
     [string]$Keystore = '',
     [string]$TargetPackage = 'org.yukars.player',
     [string]$XzJar = (Join-Path $PSScriptRoot '../target/android-libs/xz-1.12.jar'),
-    [ValidateSet('SmokeInstrumentation', 'AudioFocusInstrumentation', 'BundledGameInstrumentation', 'OriginalUiInstrumentation', 'PlaybackInstrumentation', 'ActivityControlsInstrumentation')][string]$Runner = 'SmokeInstrumentation',
+    [ValidateSet('SmokeInstrumentation', 'AudioFocusInstrumentation', 'BundledGameInstrumentation', 'OriginalUiInstrumentation', 'PlaybackInstrumentation', 'ActivityControlsInstrumentation', 'SettingsInstrumentation', 'ExtrasInstrumentation', 'MovieInstrumentation')][string]$Runner = 'SmokeInstrumentation',
     [switch]$BuildOnly
 )
 $ErrorActionPreference = 'Stop'
@@ -71,6 +72,7 @@ Invoke-Checked $Adb ($device + @('install', '-r', $Apk))
 Invoke-Checked $Adb ($device + @('install', '-r', $testApk))
 $instrument = @('shell', 'am', 'instrument', '-w', '-e', 'game', (Quote-AndroidShell $Game), '-e', 'save', (Quote-AndroidShell $Save), '-e', 'audio', (Quote-AndroidShell $Audio))
 if ($OriginalSave) { $instrument += @('-e', 'originalSave', (Quote-AndroidShell $OriginalSave)) }
+if ($FullProfile) { $instrument += @('-e', 'fullProfile', (Quote-AndroidShell $FullProfile)) }
 $instrument += "org.yukars.player.tests/org.yukars.player.$Runner"
 $result = & $Adb @device @instrument 2>&1
 $exitCode = $LASTEXITCODE

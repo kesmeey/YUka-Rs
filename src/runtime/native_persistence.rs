@@ -491,6 +491,28 @@ impl Runtime {
             put_text(layer, text, self.encoding, name, local_offset)?;
         }
         complete_dialogue_ui(&mut save, self.scene.dialogue_visible)?;
+        // Native menu settings apply to both freshly synthesized and restored UI.
+        let transparency = match self.global_flag(15) {
+            0 => 600,
+            2 => 0,
+            _ => 150,
+        };
+        let rgb = self.settings().text_color;
+        let color = u32::from(rgb[0]) | u32::from(rgb[1]) << 8 | u32::from(rgb[2]) << 16;
+        for layer in &mut save.layers {
+            match signed(&layer.header, 8)? {
+                11 | 12 => write_u32(&mut layer.header, 0x74, transparency)?,
+                13 | 14 => {
+                    write_u32(&mut layer.header, 0x30, color)?;
+                    for item in &mut layer.items {
+                        if read_u32(&item.header, 8)? == 3 {
+                            write_u32(&mut item.header, 0x44, color)?;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         save.layers
             .sort_by_key(|layer| signed(&layer.header, 8).unwrap_or_default());
         save.sounds.clear();
@@ -728,6 +750,7 @@ impl Runtime {
             replacement.timers.insert(id as i32, start);
         }
         replacement.native_template = Some(save);
+        replacement.apply_option_effects();
         replacement.drive()?;
         replacement.paused_at = self.paused_at.map(|_| Instant::now());
         replacement

@@ -51,10 +51,12 @@ final class GameImporter {
             List<Document> documents = children(resolver, tree, DocumentsContract.getTreeDocumentId(tree));
             List<Document> archives = new ArrayList<>();
             Document saves = null;
+            List<Document> movies = new ArrayList<>();
             for (Document document : documents) {
                 String name = document.name.toLowerCase(Locale.ROOT);
                 if (!document.directory && name.startsWith("data") && name.endsWith(".ykc")) archives.add(document);
                 if (document.directory && name.equals("save")) saves = document;
+                if (document.directory && (name.equals("movies") || name.equals("avi"))) movies.add(document);
             }
             if (archives.isEmpty()) throw new IOException("所选目录没有 data*.ykc，请选择游戏资源所在的文件夹");
             archives.sort((a, b) -> a.name.compareToIgnoreCase(b.name));
@@ -63,6 +65,14 @@ final class GameImporter {
                 copy(resolver, document.uri, new File(staging, document.name), document.name + "（" + (++index) + "/" + archives.size() + "）", progress);
             }
             if (saves != null) copyDirectory(resolver, tree, saves.id, new File(staging, "Save"), new HashSet<>(), progress);
+            for (Document folder : movies) {
+                File target = new File(staging, folder.name.toLowerCase(Locale.ROOT));
+                mkdir(target);
+                for (Document movie : children(resolver, tree, folder.id)) {
+                    if (!movie.directory && movie.name.toLowerCase(Locale.ROOT).endsWith(".mp4"))
+                        copy(resolver, movie.uri, new File(target, movie.name), folder.name + "/" + movie.name, progress);
+                }
+            }
             if (progress.cancelled()) throw new IOException("导入已取消");
             if (!staging.renameTo(installed)) throw new IOException("无法完成资源目录写入");
             return installed;
@@ -82,6 +92,52 @@ final class GameImporter {
         } catch (IOException | RuntimeException error) {
             if (destination.exists()) destination.delete();
             throw error;
+        }
+    }
+
+    static File stageSaves(ContentResolver resolver, Uri tree, File temporaryRoot, Progress progress) throws IOException {
+        File staging = new File(temporaryRoot, "save-import-" + UUID.randomUUID());
+        mkdir(staging);
+        try {
+            boolean system = false;
+            for (Document document : children(resolver, tree, DocumentsContract.getTreeDocumentId(tree))) {
+                if (document.directory) continue;
+                String name = document.name.toLowerCase(Locale.ROOT);
+                if (name.equals("system.dat")) { name = "System.dat"; system = true; }
+                else if (name.equals("already.dat")) name = "Already.dat";
+                else if (!name.matches("savedata\\.[0-9]{3}")) continue;
+                copy(resolver, document.uri, new File(staging, name), name, progress);
+            }
+            if (!system) throw new IOException("请选中包含 System.dat 的完整 PC Save 目录");
+            return staging;
+        } catch (IOException | RuntimeException error) {
+            try { removePrivateTree(staging, temporaryRoot); } catch (IOException cleanup) { error.addSuppressed(cleanup); }
+            throw error;
+        }
+    }
+
+    static File backupSaves(File saves) throws IOException {
+        File backup = new File(saves, "backup-before-import-" + UUID.randomUUID());
+        mkdir(backup);
+        File[] files = saves.listFiles(file -> file.isFile() && (file.getName().equalsIgnoreCase("System.dat")
+            || file.getName().equalsIgnoreCase("Already.dat") || file.getName().matches("(?i)savedata\\.[0-9]{3}")));
+        if (files == null) throw new IOException("无法备份原存档");
+        for (File file : files) java.nio.file.Files.copy(file.toPath(), new File(backup, file.getName()).toPath(),
+            java.nio.file.StandardCopyOption.COPY_ATTRIBUTES);
+        return backup;
+    }
+
+    static void publishStorySaves(File staging, File saves, Progress progress) throws IOException {
+        File[] files = staging.listFiles(file -> file.isFile() && file.getName().matches("savedata\\.[0-9]{3}"));
+        if (files == null) throw new IOException("无法读取已准备的 PC 存档");
+        for (File file : files) {
+            if (progress.cancelled()) throw new IOException("导入已中断，原存档备份保留在 Save 目录");
+            File partial = new File(saves, "." + file.getName() + ".import");
+            java.nio.file.Files.copy(file.toPath(), partial.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                java.nio.file.StandardCopyOption.COPY_ATTRIBUTES);
+            java.nio.file.Files.move(partial.toPath(), new File(saves, file.getName()).toPath(),
+                java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            progress.update("已导入 " + file.getName());
         }
     }
 

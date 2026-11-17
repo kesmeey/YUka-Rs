@@ -20,4 +20,10 @@
         android:targetPackage="org.yukars.player" android:label="Yuka RS auto skip and dialogue history" />
     <instrumentation android:name="org.yukars.player.ActivityControlsInstrumentation"
         android:targetPackage="org.yukars.player" android:label="Yuka RS real activity reading controls" />
+    <instrumentation android:name="org.yukars.player.SettingsInstrumentation"
+        android:targetPackage="org.yukars.player" android:label="Yuka RS original settings integration" />
+    <instrumentation android:name="org.yukars.player.ExtrasInstrumentation"
+        android:targetPackage="org.yukars.player" android:label="Yuka RS original extras integration" />
+    <instrumentation android:name="org.yukars.player.MovieInstrumentation"
+        android:targetPackage="org.yukars.player" android:label="Yuka RS actual OP movie playback" />
 </manifest>

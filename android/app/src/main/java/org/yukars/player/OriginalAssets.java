@@ -26,6 +26,7 @@ final class OriginalAssets {
             assets.load(session, option, "YesNo_P0" + index, 0);
         assets.load(session, "ykg\\title\\", "t_btn", 10);
         assets.load(session, "ykg\\title\\", "t_btn_msg", 5);
+        assets.load(session, "ykg\\title\\", "name_input", 0);
         assets.load(session, "ykg\\system\\window\\", "window", 0);
         assets.load(session, "ykg\\system\\window\\", "name", 0);
         assets.load(session, "ykg\\system\\window\\", "sys_btn01", 15);

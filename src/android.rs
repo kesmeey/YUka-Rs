@@ -114,6 +114,108 @@ pub extern "system" fn Java_org_yukars_player_NativeBridge_historyVoice(
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_org_yukars_player_NativeBridge_settingsSample(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    index: jint,
+) -> jstring {
+    let result = with_player(handle, |player| {
+        let sample = player
+            .runtime
+            .settings_sample(index, &player.history_cache)?;
+        Ok(env.new_string(sample.to_string())?.into_raw())
+    });
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            throw(&mut env, error);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_yukars_player_NativeBridge_historyPlayback(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    id: jlong,
+) -> jstring {
+    let result = with_player(handle, |player| {
+        let entry = player
+            .runtime
+            .history()
+            .iter()
+            .find(|entry| entry.id == id as u64)
+            .ok_or("dialogue history entry expired")?;
+        let volume = entry
+            .voices
+            .first()
+            .map_or(1.0, |path| player.runtime.history_voice_volume(path));
+        let files = player
+            .runtime
+            .history_voice_files(u64::try_from(id)?, &player.history_cache)?;
+        Ok(env
+            .new_string(serde_json::json!({"paths":files,"volume":volume}).to_string())?
+            .into_raw())
+    });
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            throw(&mut env, error);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_yukars_player_NativeBridge_extras(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) -> jstring {
+    let result = with_player(handle, |player| {
+        Ok(env
+            .new_string(serde_json::to_string(&player.runtime.extras_info()?)?)?
+            .into_raw())
+    });
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            throw(&mut env, error);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_yukars_player_NativeBridge_extrasImage(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    character: jint,
+    item: jint,
+    variant: jint,
+) -> jintArray {
+    let result = with_player(handle, |player| {
+        let image = player.runtime.extras_image(
+            usize::try_from(character)?,
+            usize::try_from(item)?,
+            variant,
+        )?;
+        encode_pixels(&mut env, Some(&image))
+    });
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            throw(&mut env, error);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_org_yukars_player_NativeBridge_image(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
@@ -260,8 +362,51 @@ pub extern "system" fn Java_org_yukars_player_NativeBridge_command(
                     player.runtime.set_paused(false);
                 }
                 "advance" if !player.title => {
+                    if player.runtime.global_flag(16) == 1 {
+                        player.runtime.stop_current_voice();
+                    }
                     player.runtime.set_playback_mode("manual")?;
                     player.runtime.advance()?;
+                }
+                "reveal" if !player.title => {
+                    if player.runtime.global_flag(16) == 1 {
+                        player.runtime.stop_current_voice();
+                    }
+                    player.runtime.reveal_text();
+                }
+                "settings" => player
+                    .runtime
+                    .update_settings(serde_json::from_str(&argument)?)?,
+                "settings_reset" => player.runtime.reset_settings(&argument)?,
+                "import_globals" => player.runtime.import_native_globals(Path::new(&argument))?,
+                "player_name" => player
+                    .runtime
+                    .set_player_name(serde_json::from_str(&argument)?)?,
+                "movie_play" => player.runtime.request_menu_movie(&argument)?,
+                "movie_finished" => player.runtime.complete_movie(argument.parse()?, None)?,
+                "movie_error" => {
+                    let (id, error) = argument
+                        .split_once(',')
+                        .ok_or("movie error requires id,message")?;
+                    player.runtime.complete_movie(id.parse()?, Some(error))?;
+                }
+                "extras_music" => {
+                    player.runtime.extras_music(argument.parse()?)?;
+                }
+                "extras_replay" => {
+                    let parts = argument
+                        .split(',')
+                        .map(str::parse::<usize>)
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    if parts.len() != 3 {
+                        return Err("extras replay requires character,scene,style".into());
+                    }
+                    player
+                        .runtime
+                        .extras_replay(parts[0], parts[1], i32::try_from(parts[2])?)?;
+                    player.title = false;
+                    player.paused = false;
+                    player.runtime.set_paused(false);
                 }
                 "playback" if !player.title => player.runtime.set_playback_mode(&argument)?,
                 "choose" if !player.title && !player.paused => {
@@ -282,7 +427,10 @@ pub extern "system" fn Java_org_yukars_player_NativeBridge_command(
                     player.paused = true;
                     player.runtime.stop_audio();
                     player.runtime.set_paused(true);
+                    player.runtime.play_title_audio(true)?;
                 }
+                "title_audio" if player.title => player.runtime.play_title_audio(false)?,
+                "menu_audio" => player.runtime.resume_menu_audio(),
                 "save" => player.runtime.save_native(Path::new(&argument))?,
                 "save_with_comment" => {
                     #[derive(serde::Deserialize)]
@@ -317,7 +465,7 @@ pub extern "system" fn Java_org_yukars_player_NativeBridge_command(
                         .then(|| parts.next().unwrap_or("Android audio error").to_owned());
                     player.runtime.audio_completed(slot, generation, error);
                 }
-                "advance" | "choose" | "playback" => {}
+                "advance" | "choose" | "playback" | "reveal" | "title_audio" => {}
                 _ => return Err(format!("unknown Android command: {operation}").into()),
             }
             Ok(())
@@ -398,8 +546,10 @@ pub extern "system" fn Java_org_yukars_player_NativeBridge_state(
             "speaker": scene.speaker, "dialogue": scene.dialogue,
             "dialogue_visible": scene.dialogue_visible && !player.hidden && !player.title,
             "speaker_offset": scene.speaker_offset, "dialogue_offset": scene.dialogue_offset,
+            "shake_offset": scene.shake_offset,
             "choices": scene.choices, "finished": scene.finished,
-            "can_save": !player.title && player.runtime.can_save(),
+            "can_save": !player.title && !player.runtime.in_recollection() && player.runtime.can_save(),
+            "in_recollection":player.runtime.in_recollection(),
             "status": scene.status, "title": player.title, "paused": player.paused,
             "audio_warning": player.runtime.report().audio_warning, "audio": audio,
             "save_page": save_page, "save_row": save_row,
@@ -409,6 +559,12 @@ pub extern "system" fn Java_org_yukars_player_NativeBridge_state(
             "voice_playing": player.runtime.voice_playing(),
             "history_count": player.runtime.history().len(),
             "history_revision": player.runtime.history_revision(),
+            "visible_chars": player.runtime.visible_chars(), "text_complete": player.runtime.text_complete(),
+            "settings": player.runtime.settings(), "player_name": player.runtime.player_name(),
+            "extras_enabled": player.runtime.global_flag(200) != 0,
+            "end_reason": player.runtime.report().end_reason,
+            "movie":player.runtime.movie_request(),
+            "keywait_icon":player.runtime.keywait_icon(), "submenu_enabled":player.runtime.submenu_enabled(),
         });
         Ok(env.new_string(json.to_string())?.into_raw())
     });

@@ -15,7 +15,7 @@ import org.json.JSONObject;
 
 /** Layout and slot numbering from Loverable's m_save.yks / m_load.yks. */
 final class OriginalSaveMenu {
-    enum Action { SAVE, LOAD, OPTIONS, PREVIOUS_CHOICE, TITLE, RETURN, EXIT }
+    enum Action { SAVE, LOAD, OPTIONS, SCREEN, TEXT, SOUND, VOICE, PREVIOUS_CHOICE, TITLE, RETURN, EXIT }
     interface Listener {
         void page(int page);
         void slot(int row);
@@ -139,7 +139,7 @@ final class OriginalSaveMenu {
         for (int index = 0; index < 20; index++)
             if (inside(x, y, index < 10 ? 557 : 602, 80 + 49 * (index % 10), 40, 40)) { listener.page(index); return; }
         int[] positions = {185, 217, 249, 281, 338, 370, 426, 458, 490, 546};
-        Action[] actions = {Action.OPTIONS, Action.OPTIONS, Action.OPTIONS, Action.OPTIONS,
+        Action[] actions = {Action.SCREEN, Action.TEXT, Action.SOUND, Action.VOICE,
             Action.SAVE, Action.LOAD, Action.PREVIOUS_CHOICE, Action.TITLE, Action.RETURN, Action.EXIT};
         for (int index = 0; index < positions.length; index++)
             if (inside(x, y, 656, positions[index], 144, 25)) { listener.action(actions[index]); return; }

@@ -14,6 +14,13 @@ thread_local! {
     static GENERATION: RefCell<u64> = const { RefCell::new(0) };
 }
 
+fn default_groups() -> BTreeMap<i32, (i32, i32, i32)> {
+    [(0, (1, 9, 650)), (1, (100, 599, 650)), (2, (99, 99, 1000))]
+        .into_iter()
+        .chain((3..=14).map(|group| (group, (group + 7, group + 7, 1000))))
+        .collect()
+}
+
 pub fn configure_cache(directory: PathBuf) -> Result<()> {
     std::fs::create_dir_all(&directory)?;
     CACHE.with(|cache| *cache.borrow_mut() = directory);
@@ -56,6 +63,9 @@ pub struct Sound {
     events: Vec<AudioEvent>,
     muted: bool,
     paused_at: Option<Instant>,
+    groups: BTreeMap<i32, (i32, i32, i32)>,
+    auto_duck: bool,
+    duck_active: bool,
     pub warning: Option<String>,
     pub decoded_sounds: usize,
 }
@@ -69,6 +79,9 @@ impl Sound {
             events: Vec::new(),
             muted,
             paused_at: None,
+            groups: default_groups(),
+            auto_duck: false,
+            duck_active: false,
             warning: None,
             decoded_sounds: 0,
         }
@@ -82,7 +95,7 @@ impl Sound {
             generation: self.generations.get(&slot).copied().unwrap_or(0),
             path,
             looping: state.is_some_and(|state| state.looping),
-            volume: state.map_or(1.0, |state| state.volume as f32 / 1000.0) * 0.65,
+            volume: state.map_or(1.0, |state| state.volume as f32 / 1000.0) * self.group_gain(slot),
         });
     }
 
@@ -126,6 +139,72 @@ impl Sound {
         Ok(())
     }
 
+    fn group_gain(&self, slot: i32) -> f32 {
+        let gain = self
+            .groups
+            .values()
+            .find(|&&(start, end, _)| (start..=end).contains(&slot))
+            .map_or(1.0, |&(_, _, volume)| volume as f32 / 1000.0);
+        gain * if self.duck_active && (1..=9).contains(&slot) {
+            0.5
+        } else {
+            1.0
+        }
+    }
+
+    pub fn set_auto_duck(&mut self, enabled: bool) {
+        self.auto_duck = enabled;
+        self.update_duck();
+    }
+
+    fn update_duck(&mut self) {
+        let active = self.auto_duck && (10..=21).any(|slot| self.is_audible(slot));
+        if active != self.duck_active {
+            self.duck_active = active;
+            for slot in self
+                .states
+                .keys()
+                .copied()
+                .filter(|slot| (1..=9).contains(slot))
+                .collect::<Vec<_>>()
+            {
+                self.event("volume", slot, None);
+            }
+        }
+    }
+
+    pub fn group_set(&mut self, group: i32, start: i32, end: i32) -> Result<()> {
+        if group < 0 || start < 0 || end < start || end > 10000 {
+            return Err("invalid sound group".into());
+        }
+        let volume = self.groups.get(&group).map_or(1000, |entry| entry.2);
+        self.groups.insert(group, (start, end, volume));
+        Ok(())
+    }
+
+    pub fn group_volume(&mut self, group: i32, volume: i32) {
+        if let Some(entry) = self.groups.get_mut(&group) {
+            entry.2 = volume.clamp(0, 1000);
+            let (start, end, _) = *entry;
+            for slot in self
+                .states
+                .keys()
+                .copied()
+                .filter(|slot| (start..=end).contains(slot))
+                .collect::<Vec<_>>()
+            {
+                self.event("volume", slot, None);
+            }
+        }
+        self.update_duck();
+    }
+
+    pub fn is_audible(&self, slot: i32) -> bool {
+        self.is_playing(slot)
+            && self.group_gain(slot) > 0.0
+            && self.states.get(&slot).is_some_and(|state| state.volume > 0)
+    }
+
     pub fn play(&mut self, slot: i32, looping: bool) -> Result<()> {
         let state = self
             .states
@@ -140,6 +219,7 @@ impl Sound {
                 self.event("pause_all", 0, None);
             }
         }
+        self.update_duck();
         Ok(())
     }
 
@@ -154,6 +234,7 @@ impl Sound {
             state.volume = volume.clamp(0, 1000);
             self.event("volume", slot, None);
         }
+        self.update_duck();
     }
 
     pub fn fade_delete(&mut self, slot: i32, milliseconds: i32) {
@@ -220,6 +301,7 @@ impl Sound {
         }
         self.fades.remove(&slot);
         self.event("stop", slot, None);
+        self.update_duck();
     }
 
     pub fn stop_all(&mut self) {
@@ -269,6 +351,7 @@ impl Sound {
         {
             state.playing = false;
         }
+        self.update_duck();
     }
 
     pub fn drain_events(&mut self) -> Vec<AudioEvent> {
@@ -279,6 +362,74 @@ impl Sound {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn independent_group_gains_update_audio_without_overwriting_script_volume() {
+        let mut sound = Sound::new(false);
+        for slot in [1, 100, 10, 11] {
+            sound.states.insert(
+                slot,
+                SoundState {
+                    path: "sample.ogg".into(),
+                    volume: 500,
+                    looping: false,
+                    playing: true,
+                    streamed: false,
+                },
+            );
+            sound.generations.insert(slot, 1);
+            sound.event("play", slot, None);
+        }
+        let events = sound.drain_events();
+        assert!((events[0].volume - 0.325).abs() < 0.0001);
+        assert!((events[1].volume - 0.325).abs() < 0.0001);
+        assert!((events[2].volume - 0.5).abs() < 0.0001);
+        sound.group_volume(3, 0);
+        assert!(!sound.is_audible(10));
+        assert!(sound.is_audible(11));
+        assert_eq!(sound.states[&10].volume, 500);
+        let events = sound.drain_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].slot, 10);
+        assert_eq!(events[0].volume, 0.0);
+    }
+
+    #[test]
+    fn voice_duck_restores_bgm_on_valid_completion_and_mute() {
+        let mut sound = Sound::new(false);
+        for slot in [1, 10] {
+            sound.states.insert(
+                slot,
+                SoundState {
+                    path: "sample.ogg".into(),
+                    volume: 1000,
+                    looping: slot == 1,
+                    playing: slot == 1,
+                    streamed: false,
+                },
+            );
+            sound.generations.insert(slot, 9);
+        }
+        sound.set_auto_duck(true);
+        sound.play(10, false).unwrap();
+        assert!(sound.duck_active);
+        assert!((sound.group_gain(1) - 0.325).abs() < 0.0001);
+        sound.completed(10, 8);
+        assert!(sound.duck_active);
+        sound.completed(10, 9);
+        assert!(!sound.duck_active);
+        assert!((sound.group_gain(1) - 0.65).abs() < 0.0001);
+        sound.play(10, false).unwrap();
+        assert!(sound.duck_active);
+        sound.group_volume(3, 0);
+        assert!(!sound.duck_active);
+        assert!(
+            sound
+                .drain_events()
+                .iter()
+                .any(|event| event.op == "volume" && event.slot == 1)
+        );
+    }
 
     #[test]
     fn stale_completions_do_not_stop_new_playback_or_replacement_runtime() {

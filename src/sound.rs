@@ -34,6 +34,9 @@ pub struct Sound {
     fades: BTreeMap<i32, Fade>,
     states: BTreeMap<i32, SoundState>,
     paused_at: Option<Instant>,
+    groups: BTreeMap<i32, (i32, i32, i32)>,
+    auto_duck: bool,
+    duck_active: bool,
     pub warning: Option<String>,
     pub decoded_sounds: usize,
 }
@@ -56,6 +59,12 @@ impl Sound {
             fades: BTreeMap::new(),
             states: BTreeMap::new(),
             paused_at: None,
+            groups: [(0, (1, 9, 650)), (1, (100, 599, 650)), (2, (99, 99, 1000))]
+                .into_iter()
+                .chain((3..=14).map(|group| (group, (group + 7, group + 7, 1000))))
+                .collect(),
+            auto_duck: false,
+            duck_active: false,
             warning,
             decoded_sounds: 0,
         }
@@ -84,6 +93,74 @@ impl Sound {
         Ok(())
     }
 
+    fn group_gain(&self, slot: i32) -> f32 {
+        let gain = self
+            .groups
+            .values()
+            .find(|&&(start, end, _)| (start..=end).contains(&slot))
+            .map_or(1.0, |&(_, _, volume)| volume as f32 / 1000.0);
+        gain * if self.duck_active && (1..=9).contains(&slot) {
+            0.5
+        } else {
+            1.0
+        }
+    }
+
+    pub fn set_auto_duck(&mut self, enabled: bool) {
+        self.auto_duck = enabled;
+        self.update_duck();
+    }
+
+    fn update_duck(&mut self) {
+        let active = self.auto_duck && (10..=21).any(|slot| self.is_audible(slot));
+        if active != self.duck_active {
+            self.duck_active = active;
+            for (&slot, sink) in &self.sinks {
+                if (1..=9).contains(&slot) {
+                    sink.set_volume(
+                        self.states
+                            .get(&slot)
+                            .map_or(1.0, |state| state.volume as f32 / 1000.0)
+                            * self.group_gain(slot),
+                    );
+                }
+            }
+        }
+    }
+
+    pub fn group_set(&mut self, group: i32, start: i32, end: i32) -> Result<()> {
+        if group < 0 || start < 0 || end < start || end > 10000 {
+            return Err("invalid sound group".into());
+        }
+        let volume = self.groups.get(&group).map_or(1000, |entry| entry.2);
+        self.groups.insert(group, (start, end, volume));
+        Ok(())
+    }
+
+    pub fn group_volume(&mut self, group: i32, volume: i32) {
+        if let Some(entry) = self.groups.get_mut(&group) {
+            entry.2 = volume.clamp(0, 1000);
+            let (start, end, _) = *entry;
+            for (&slot, sink) in &self.sinks {
+                if (start..=end).contains(&slot) {
+                    sink.set_volume(
+                        self.states
+                            .get(&slot)
+                            .map_or(1.0, |state| state.volume as f32 / 1000.0)
+                            * self.group_gain(slot),
+                    );
+                }
+            }
+        }
+        self.update_duck();
+    }
+
+    pub fn is_audible(&self, slot: i32) -> bool {
+        self.is_playing(slot)
+            && self.group_gain(slot) > 0.0
+            && self.states.get(&slot).is_some_and(|state| state.volume > 0)
+    }
+
     pub fn play(&mut self, slot: i32, looping: bool) -> Result<()> {
         let data = self
             .data
@@ -93,7 +170,7 @@ impl Sound {
         self.fades.remove(&slot);
         if let Some((_, handle)) = &self.stream {
             let sink = Sink::try_new(handle)?;
-            sink.set_volume(*self.volumes.get(&slot).unwrap_or(&1.0) * 0.65);
+            sink.set_volume(*self.volumes.get(&slot).unwrap_or(&1.0) * self.group_gain(slot));
             if looping {
                 sink.append(decoder.repeat_infinite());
             } else {
@@ -110,6 +187,7 @@ impl Sound {
                 sink.pause();
             }
         }
+        self.update_duck();
         Ok(())
     }
 
@@ -126,8 +204,9 @@ impl Sound {
         let volume = volume.clamp(0, 1000) as f32 / 1000.0;
         self.volumes.insert(slot, volume);
         if let Some(sink) = self.sinks.get(&slot) {
-            sink.set_volume(volume * 0.65);
+            sink.set_volume(volume * self.group_gain(slot));
         }
+        self.update_duck();
     }
 
     pub fn fade_delete(&mut self, slot: i32, milliseconds: i32) {
@@ -135,7 +214,7 @@ impl Sound {
             self.delete(slot);
             return;
         }
-        let volume = self.sinks[&slot].volume();
+        let volume = self.states[&slot].volume as f32 / 1000.0;
         self.fades.insert(
             slot,
             Fade {
@@ -159,8 +238,8 @@ impl Sound {
             Fade {
                 start: Instant::now(),
                 duration: Duration::from_millis(milliseconds as u64),
-                volume: self.sinks[&slot].volume(),
-                target: target.clamp(0, 1000) as f32 / 1000.0 * 0.65,
+                volume: self.states[&slot].volume as f32 / 1000.0,
+                target: target.clamp(0, 1000) as f32 / 1000.0,
                 delete: false,
             },
         );
@@ -177,7 +256,9 @@ impl Sound {
                 / fade.duration.as_secs_f32())
             .min(1.0);
             if let Some(sink) = self.sinks.get(&slot) {
-                sink.set_volume(fade.volume + (fade.target - fade.volume) * progress);
+                sink.set_volume(
+                    (fade.volume + (fade.target - fade.volume) * progress) * self.group_gain(slot),
+                );
             }
             if progress >= 1.0 {
                 finished.push((slot, fade.delete, fade.target));
@@ -188,9 +269,10 @@ impl Sound {
             if delete {
                 self.delete(slot);
             } else {
-                self.volume(slot, (target / 0.65 * 1000.0).round() as i32);
+                self.volume(slot, (target * 1000.0).round() as i32);
             }
         }
+        self.update_duck();
     }
 
     pub fn stop(&mut self, slot: i32) {
@@ -201,6 +283,7 @@ impl Sound {
         if let Some(sink) = self.sinks.remove(&slot) {
             sink.stop();
         }
+        self.update_duck();
     }
     pub fn stop_all(&mut self) {
         for state in self.states.values_mut() {
