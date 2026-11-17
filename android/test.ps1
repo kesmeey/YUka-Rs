@@ -1,25 +1,40 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Apk,
-    [Parameter(Mandatory = $true)][string]$SdkPlatform,
-    [Parameter(Mandatory = $true)][string]$BuildTools,
+    [string]$SdkRoot = '',
+    [string]$SdkPlatform = '',
+    [string]$BuildTools = '',
     [Parameter(Mandatory = $true)][string]$Game,
     [Parameter(Mandatory = $true)][string]$Save,
     [Parameter(Mandatory = $true)][string]$Audio,
     [string]$OriginalSave = '',
     [string]$FullProfile = '',
-    [string]$Adb = 'adb',
+    [string]$Adb = '',
     [string]$Serial = '',
-    [string]$JavaHome = $env:JAVA_HOME,
+    [string]$JavaHome = '',
     [string]$Keystore = '',
     [string]$TargetPackage = 'org.yukars.player',
-    [string]$XzJar = (Join-Path $PSScriptRoot '../target/android-libs/xz-1.12.jar'),
+    [string]$XzJar = '',
+    [string]$OutputDirectory = '',
     [ValidateSet('SmokeInstrumentation', 'AudioFocusInstrumentation', 'BundledGameInstrumentation', 'OriginalUiInstrumentation', 'PlaybackInstrumentation', 'ActivityControlsInstrumentation', 'SettingsInstrumentation', 'ExtrasInstrumentation', 'MovieInstrumentation')][string]$Runner = 'SmokeInstrumentation',
-    [switch]$BuildOnly
+    [switch]$BuildOnly,
+    [switch]$KeepIntermediateApks
 )
 $ErrorActionPreference = 'Stop'
+if (-not $BuildOnly -and [string]::IsNullOrWhiteSpace($Serial)) {
+    throw 'Device tests require an explicit -Serial. Use -BuildOnly to build without contacting any device.'
+}
 $project = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
-$output = Join-Path $project ('target/android-tests/run-' + [Guid]::NewGuid().ToString('N'))
+. (Join-Path $PSScriptRoot 'toolchains.ps1')
+$tools = Resolve-YukaAndroidTools -Project $project -SdkRoot $SdkRoot -SdkPlatform $SdkPlatform -BuildTools $BuildTools -JavaHome $JavaHome -XzJar $XzJar -Adb $Adb -RequireAdb:(-not $BuildOnly)
+$SdkPlatform = $tools.SdkPlatform
+$BuildTools = $tools.BuildTools
+$JavaHome = $tools.JavaHome
+$XzJar = $tools.XzJar
+$Adb = $tools.Adb
+$output = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
+    Join-Path (Get-YukaAndroidWorkRoot $project) ('tests/run-' + [Guid]::NewGuid().ToString('N'))
+} else { [IO.Path]::GetFullPath($OutputDirectory, $project) }
 $platformJar = Join-Path $SdkPlatform 'android.jar'
 if (-not $Keystore) { $Keystore = Join-Path $project 'bin/android-development.jks' }
 foreach ($required in @($Apk, $platformJar, $Keystore, $XzJar, "$BuildTools/aapt2.exe", "$BuildTools/d8.bat", "$JavaHome/bin/javac.exe")) {
@@ -62,9 +77,11 @@ try {
 } finally { $archive.Dispose() }
 Invoke-Checked "$BuildTools/zipalign.exe" @('-f', '4', "$output/unsigned.apk", "$output/aligned.apk")
 $testApk = Join-Path $project 'bin/Yuka-Rs-tests.apk'
-Invoke-Checked "$BuildTools/apksigner.bat" @('sign', '--ks', $Keystore, '--ks-key-alias', 'yuka-rs', '--ks-pass', 'pass:android', '--key-pass', 'pass:android', '--out', $testApk, "$output/aligned.apk")
+Invoke-Checked "$BuildTools/apksigner.bat" @('sign', '--v4-signing-enabled', 'false', '--ks', $Keystore, '--ks-key-alias', 'yuka-rs', '--ks-pass', 'pass:android', '--key-pass', 'pass:android', '--out', $testApk, "$output/aligned.apk")
 Invoke-Checked "$BuildTools/apksigner.bat" @('verify', '--verbose', $testApk)
+Remove-YukaV4Sidecar $testApk
 Get-FileHash -LiteralPath $testApk -Algorithm SHA256
+if (-not $KeepIntermediateApks) { Remove-YukaIntermediateApks $output }
 if ($BuildOnly) { return }
 $device = @()
 if ($Serial) { $device = @('-s', $Serial) }

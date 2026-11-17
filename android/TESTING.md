@@ -2,6 +2,39 @@
 
 `tests/` 构建为独立的 `org.yukars.player.tests` instrumentation APK。测试在播放器应用 UID 下执行真实 JNI，会创建测试存档和音频缓存。
 
+## 手机震屏报错修复 0.2.5
+
+连接的 Android 15 ARM64 手机在0.2.4执行
+`yks/story/kaho/kaho_07.yks @1263 Effect(2,20,1)` 时报告未支持的震屏模式2。
+进程仍在前台，是引擎主动暂停。用户要求保留现场，本轮对该手机只读取日志和截图，未安装、
+停止、重启应用或运行 instrumentation。更新会结束原进程，需从已有存档继续。
+
+本次按原版分派函数补齐模式1至6。Rust回归覆盖每一步位移、奇数幅度、默认值、简化、
+快进、暂停与复位；只读语料回归覆盖175个脚本的442次Effect调用，在普通、简化和快进模式验证。
+实现依据和可复现命令见 `docs/screen-shake.md`。
+
+0.2.5的 `cargo test --lib --locked` 结果为57项通过、0失败、13项依赖本地资源的测试默认跳过。
+其中全部Effect调用的本地语料测试另行显式执行并通过：模式1共33处、模式2共6处、
+模式5共402处、模式6共1处。`cargo fmt --check` 和 `cargo clippy --all-targets --locked -- -D warnings` 通过。
+
+更新包 `bin/Loverable-Yuka-Rs-0.2.5-update.apk` 的包名为 `org.yukars.loverable`，
+versionName为0.2.5、versionCode为6，保留双ABI、原EXE图标、开发签名与OP视频。
+包内不包含五份XZ游戏资源，只能复用完整版已经完成的资源；不会重新解压。
+`BundledGameInstrumentation` 新增五项检查：已准备资源复用、新安装拒绝、错误文件长度拒绝、
+错误receipt摘要拒绝和缺失文件拒绝，并检查存档、receipt及临时文件不被更改。
+
+修复更新包大小46,515,251字节，SHA-256为
+`3E51FC25E45D4733715D0AA753E977BC56D002E83675CA5B8324EAC4EEE811B9`。
+签名v2/v3、两种ABI的ELF及APK的16KiB对齐校验均通过。证书SHA-256为
+`98bb79a749376f8fad0ae32d7942c10b6aa516df72365bcc7d1b07162118c5d0`，与本机0.2.4播放器一致。
+包内容检查确认更新标记为true、五条资源记录、没有XZ载荷，并保留40,988,694字节的未压缩MP4。
+源资源清单没有被修改。构建使用共享API36 SDK/NDK29，应用目标仍为API35、最低API26。
+
+全部Java应用与测试代码以 `--release 8 -Xlint:all -Werror` 编译成功，测试APK构建及签名校验通过。
+本轮尝试在独立 `emulator-5582` 上执行新增解包器测试，但模拟器在初始化userdata镜像阶段
+未完成启动，因此本轮instrumentation未执行，不能视为设备测试通过。临时模拟器使用独立目录，
+没有使用物理手机执行替代测试；0.2.5的设备运行与实际覆盖安装仍待验证。
+
 ## 完整游戏 APK
 
 `bin/Loverable-Yuka-Rs-0.2.4.apk` 的目标包名为 `org.yukars.loverable`。资源准备与构建命令见项目 README。
@@ -21,8 +54,6 @@ adb -s emulator-5580 shell am start -n org.yukars.loverable/org.yukars.player.Ma
 ```powershell
 $bundleTest = @{
     Apk = '.\bin\Loverable-Yuka-Rs-0.2.4.apk'
-    SdkPlatform = '.\target\android-sdk\android-35'
-    BuildTools = '.\target\android-sdk\android-15'
     JavaHome = 'E:\DevEco Studio\jbr'
     XzJar = '.\target\android-libs\xz-1.12.jar'
     Adb = 'E:\platform-tools\adb.exe'
@@ -194,8 +225,6 @@ OP 视频及特效实现边界继续适用，具体见项目 README。
 ```powershell
 $test = @{
     Apk = '.\bin\Yuka-Rs-0.2.2.apk'
-    SdkPlatform = '.\target\android-sdk\android-35'
-    BuildTools = '.\target\android-sdk\android-15'
     JavaHome = 'E:\DevEco Studio\jbr'
     Adb = 'E:\platform-tools\adb.exe'
     Serial = 'emulator-5580'
@@ -206,7 +235,9 @@ $test = @{
 .\android\test.ps1 @test -BuildOnly
 ```
 
-输出为 `bin/Yuka-Rs-tests.apk`。每次构建的中间文件保存在独立的 `target/android-tests/run-*` 目录，Java 源码以 `-Xlint:all -Werror` 编译。
+输出为 `bin/Yuka-Rs-tests.apk`。每次构建的中间文件保存在系统临时目录下的独立运行目录，Java 源码以 `-Xlint:all -Werror` 编译。
+工具路径可以显式指定，也可自动复用本机已验证的共享SDK；详见 `docs/toolchains.md`。
+非 `-BuildOnly` 的测试必须提供明确的 `-Serial`，脚本不会自动选择已连接的手机。
 
 ## 执行
 

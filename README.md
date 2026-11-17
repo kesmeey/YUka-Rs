@@ -6,6 +6,18 @@
 项目位置为 `E:\llvm-agent\yuka-rs`。本轮以用户提供的《情侣热恋中》汉化版作为真实样本。
 格式和 VM 位于 library crate，桌面宿主使用 minifb、fontdue、image 和 rodio。
 
+## 手机剧情报错修复 0.2.5
+
+`bin/Loverable-Yuka-Rs-0.2.5-update.apk` 用于已安装完整版、五个游戏资源已经准备完成的设备。
+它与完整版使用相同包名和签名，覆盖安装保留应用数据及原版格式存档，复用已解压的资源，保留 OP 视频。
+请勿先卸载应用或清除数据；更新会结束当前进程，安装后需从已有存档继续，不能恢复报错进程的未存档状态。
+新设备或资源准备未完成时，这个更新包会提示先安装完整版，不会删除已有资源或存档。
+
+修复 `yks/story/kaho/kaho_07.yks @1263` 的 `Effect(2,20,1)` 报错，并按原版补齐全部六种震屏模式。
+对样本全部175个脚本中的442次 Effect 调用逐一验证，包含此前未支持的模式2和6。
+原版轨迹、阻塞时间和回归范围见 [震屏说明](docs/screen-shake.md)，APK校验及设备测试见 [测试记录](android/TESTING.md)。
+本次保留连接手机的报错现场，未向该手机安装、重启或执行 instrumentation。
+
 ## 《情侣热恋中》完整游戏 APK
 
 `bin/Loverable-Yuka-Rs-0.2.4.apk` 将 Rust 引擎、本机汉化版的五个原始 `data*.ykc` 与适配 Android 的 OP 视频一起打包。
@@ -51,7 +63,7 @@ MP4直接通过 APK 文件描述符播放，无需首次解压；支持暂停/�
 设备首次解包后的五个 YKC 文件 SHA-256 均与 PC 原包一致。完整 APK 已通过标题与新游戏点击、
 快速存读档、后台自动保存后重启继续、PC 原档与回存档读取续行、选择支两个分支恢复及音频焦点回归。
 资源准备中断后的恢复和已完成资源的复用也已检查。应用与展开资源合计约占 7.60 GB，另存的 APK 文件占用额外空间。
-ARM64 当前完成交叉编译，实机运行、扬声器输出和完整路线的逐帧音画对照仍待验证。
+ARM64 0.2.4 已在用户手机运行；0.2.5修复尚未覆盖安装实机复测，扬声器输出和完整路线的逐帧音画对照仍待验证。
 OP 视频及特效边界见下方“当前演示边界”。
 
 ### 构建完整游戏 APK
@@ -69,13 +81,17 @@ $game = 'D:\gal\love loabe\【PC】情侣热恋中\情侣热恋中（ラブラ�
 python .\android\prepare-game.py $game .\target\bundled-loverable\assets
 python .\android\prepare-video.py $game .\target\bundled-loverable\assets
 .\android\build.ps1 `
-    -SdkPlatform .\target\android-sdk\android-35 `
-    -BuildTools .\target\android-sdk\android-15 `
-    -Ndk .\target\android-sdk\android-ndk-r27c `
-    -JavaHome 'E:\DevEco Studio\jbr' `
     -IconExecutable (Join-Path $game 'Loverable_cn.exe') `
     -BundleDirectory .\target\bundled-loverable\assets
+
+# 已准备完成资源的设备可生成小型更新包：
+.\android\build.ps1 `
+    -IconExecutable (Join-Path $game 'Loverable_cn.exe') `
+    -BundleDirectory .\target\bundled-loverable\assets -ThinUpdate
 ```
+
+构建脚本自动查找可用工具，本机优先复用F盘已有SDK/NDK；可用 `-CheckTools` 只读检查解析结果。
+工具覆盖参数、构建缓存与临时包清理见 [工具链说明](docs/toolchains.md)。
 
 资源准备会校验每个 XZ 文件解压后的长度与 SHA-256，再写入资源清单。构建完成后校验 APK 签名和对齐。
 本次五个原始包合计 4,417,273,802 字节，XZ 数据合计 3,136,805,240 字节，主机重解压后的五份 SHA-256
@@ -202,7 +218,7 @@ $game = 'D:\gal\love loabe\【PC】情侣热恋中\情侣热恋中（ラブラ�
 
 Windows 消息框为自绘布局，Android 界面采用上文所述原图布局，正文按设置逐字显示，字体效果可调整。
 普通转场与蒙版转场使用交叉淡化，
-`Effect` 的1/5模式使用逆向确认的纵向/二维震动轨迹。文字框移动、背景滚动和音频异步淡出已有实现。
+`Effect` 的1至6模式使用逆向确认的纵向、横向、斜向和二维震动轨迹。文字框移动、背景滚动和音频异步淡出已有实现。
 剧情音频按所选声音组和脚本局部音量相乘。设备不可用时显示静音状态。
 
 Windows/headless 的 `MoviePlay` 仍跳过并记录到报告，Android 使用上述真实视频播放。

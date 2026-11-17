@@ -34,6 +34,7 @@ final class BundledGame {
     static final class Bundle {
         final String id;
         final String name;
+        final boolean requiresPreparedResources;
         final List<Resource> files = new ArrayList<>();
         long bytes;
 
@@ -42,6 +43,9 @@ final class BundledGame {
                 JSONObject json = new JSONObject(text);
                 id = json.getString("id");
                 name = json.getString("name");
+                if (json.has("requiresPreparedResources") && !(json.get("requiresPreparedResources") instanceof Boolean))
+                    throw new IOException("游戏资源清单更新包标记无效");
+                requiresPreparedResources = json.optBoolean("requiresPreparedResources", false);
                 if (!id.matches("[a-z0-9][a-z0-9-]{0,63}") || name.isEmpty())
                     throw new IOException("游戏资源清单标识无效");
                 JSONArray entries = json.getJSONArray("files");
@@ -98,6 +102,10 @@ final class BundledGame {
 
     static synchronized File prepare(AssetSource assets, Bundle bundle, File privateDirectory, GameImporter.Progress progress) throws IOException {
         File directory = new File(privateDirectory, "game-bundled-" + bundle.id);
+        // An update-only APK intentionally contains no archive payloads. Check
+        // every cached archive before mkdir, partial cleanup, or receipt writes.
+        // Both success and refusal leave the prepared game and Save untouched.
+        if (bundle.requiresPreparedResources) return reusePrepared(bundle, directory, progress);
         GameImporter.mkdir(directory);
         JSONObject receipt = readReceipt(new File(directory, RECEIPT));
         Set<String> currentNames = new HashSet<>();
@@ -109,9 +117,7 @@ final class BundledGame {
             File target = new File(directory, resource.name);
             File partial = new File(directory, "." + resource.name + ".part");
             Files.deleteIfExists(partial.toPath());
-            JSONObject record = receipt.optJSONObject(resource.name);
-            if (target.isFile() && target.length() == resource.size && record != null
-                && record.optLong("size", -1) == resource.size && resource.sha256.equals(record.optString("sha256"))) {
+            if (isPrepared(resource, target, receipt)) {
                 completed += resource.size;
                 index++;
                 showProgress(progress, bundle, resource, completed, index);
@@ -144,6 +150,24 @@ final class BundledGame {
         if (!obsolete.isEmpty()) writeReceipt(new File(directory, RECEIPT), receipt);
         progress.update(bundle.name + " · 资源准备完成");
         return directory;
+    }
+
+    private static File reusePrepared(Bundle bundle, File directory, GameImporter.Progress progress) throws IOException {
+        JSONObject receipt = readReceipt(new File(directory, RECEIPT));
+        for (Resource resource : bundle.files) {
+            checkCancelled(progress);
+            if (!isPrepared(resource, new File(directory, resource.name), receipt))
+                throw new IOException("更新包不含游戏资源，请先安装完整版完成资源准备（" + resource.name + "）");
+        }
+        checkCancelled(progress);
+        progress.update(bundle.name + " · 已复用准备完成的游戏资源");
+        return directory;
+    }
+
+    private static boolean isPrepared(Resource resource, File target, JSONObject receipt) {
+        JSONObject record = receipt.optJSONObject(resource.name);
+        return target.isFile() && target.length() == resource.size && record != null
+            && record.optLong("size", -1) == resource.size && resource.sha256.equals(record.optString("sha256"));
     }
 
     private static void copyResource(AssetSource assets, Resource resource, File partial, Bundle bundle,

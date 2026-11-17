@@ -70,6 +70,8 @@ public final class BundledGameInstrumentation extends Instrumentation {
             require(!new File(installed, ".data01.ykc.part").exists(), "abandoned partial file remains");
             assertBytes(save, savedBytes);
 
+            testPreparedOnly(root);
+
             stage = "interrupted_resume";
             BundledGame.Bundle interrupted = manifest("interrupted", "data01.ykc", "data02.ykc");
             boolean interruptedAsExpected = false;
@@ -170,6 +172,7 @@ public final class BundledGameInstrumentation extends Instrumentation {
             }
             result.putString("summary", "{\"passed\":true,\"bundled_install\":true,\"interrupted_resume\":true,"
                 + "\"unchanged_restart\":true,\"update_preserves_saves\":true,\"checksum_failure_preserves_current\":true,"
+                + "\"thin_cached_reuse\":true,\"thin_fresh_refusal\":true,\"thin_damaged_refusal_preserves_files\":true,"
                 + "\"xz_extraction\":true,\"xz_truncated_retry\":true,\"native_xz_large_buffers\":true,\"native_xz_tiny_input\":true}");
             code = Activity.RESULT_OK;
         } catch (Throwable error) { result.putString("failure", stage + " - " + error); }
@@ -178,6 +181,89 @@ public final class BundledGameInstrumentation extends Instrumentation {
             catch (IOException error) { result.putString("cleanup_error", error.toString()); }
             finish(code, result);
         }
+    }
+
+    private void testPreparedOnly(File root) throws Exception {
+        stage = "thin_cached_reuse";
+        BundledGame.Bundle full = manifest("thin-fixture", "data01.ykc", "data02.ykc");
+        require(!full.requiresPreparedResources, "full bundle unexpectedly requires an earlier installation");
+        File installed = BundledGame.prepare(this::open, full, root, progress);
+        BundledGame.Bundle thin = manifest("thin-fixture", true, "data01.ykc", "data02.ykc");
+        require(thin.requiresPreparedResources, "update-only manifest flag was not read");
+        File save = new File(installed, "Save/savedata.003");
+        GameImporter.mkdir(save.getParentFile());
+        byte[] savedBytes = new byte[]{7, 0, (byte) 255};
+        Files.write(save.toPath(), savedBytes);
+        File receipt = new File(installed, ".bundle-state.json");
+        byte[] receiptBytes = Files.readAllBytes(receipt.toPath());
+        File partial = new File(installed, ".data01.ykc.part");
+        byte[] partialBytes = new byte[]{8, 9};
+        Files.write(partial.toPath(), partialBytes);
+        File receiptPartial = new File(installed, ".bundle-state.json.part");
+        byte[] receiptPartialBytes = new byte[]{4, 3, 2, 1};
+        Files.write(receiptPartial.toPath(), receiptPartialBytes);
+        opens.clear();
+        require(BundledGame.prepare(this::open, thin, root, progress).equals(installed), "thin update changed game directory");
+        require(opens.isEmpty(), "thin update opened a game archive asset");
+        assertBytes(new File(installed, "data01.ykc"), assets.get("bundled/data01.ykc"));
+        assertBytes(new File(installed, "data02.ykc"), assets.get("bundled/data02.ykc"));
+        assertBytes(save, savedBytes);
+        assertBytes(receipt, receiptBytes);
+        assertBytes(partial, partialBytes);
+        assertBytes(receiptPartial, receiptPartialBytes);
+
+        stage = "thin_fresh_refusal";
+        File fresh = new File(root, "missing-private-directory");
+        require(!fresh.exists(), "fresh update fixture already exists");
+        expectPreparedRefusal(thin, fresh);
+        require(!fresh.exists(), "refused thin first install created directories");
+
+        stage = "thin_damaged_refusal_preserves_files";
+        File damaged = new File(installed, "data02.ykc");
+        byte[] damagedBytes = new byte[]{42};
+        Files.write(damaged.toPath(), damagedBytes);
+        expectPreparedRefusal(thin, root);
+        assertBytes(new File(installed, "data01.ykc"), assets.get("bundled/data01.ykc"));
+        assertBytes(damaged, damagedBytes);
+        assertBytes(save, savedBytes);
+        assertBytes(receipt, receiptBytes);
+        assertBytes(partial, partialBytes);
+        assertBytes(receiptPartial, receiptPartialBytes);
+
+        stage = "thin_receipt_mismatch_refusal";
+        Files.write(damaged.toPath(), assets.get("bundled/data02.ykc"));
+        JSONObject wrongReceipt = new JSONObject(new String(receiptBytes, StandardCharsets.UTF_8));
+        wrongReceipt.getJSONObject("data02.ykc").put("sha256", String.format(Locale.ROOT, "%064d", 0));
+        byte[] wrongReceiptBytes = wrongReceipt.toString().getBytes(StandardCharsets.UTF_8);
+        Files.write(receipt.toPath(), wrongReceiptBytes);
+        expectPreparedRefusal(thin, root);
+        assertBytes(save, savedBytes);
+        assertBytes(receipt, wrongReceiptBytes);
+        assertBytes(partial, partialBytes);
+        assertBytes(receiptPartial, receiptPartialBytes);
+
+        stage = "thin_missing_archive_refusal";
+        Files.write(receipt.toPath(), receiptBytes);
+        Files.delete(damaged.toPath());
+        expectPreparedRefusal(thin, root);
+        require(!damaged.exists(), "thin update restored a missing archive");
+        assertBytes(save, savedBytes);
+        assertBytes(receipt, receiptBytes);
+        assertBytes(partial, partialBytes);
+        assertBytes(receiptPartial, receiptPartialBytes);
+    }
+
+    private void expectPreparedRefusal(BundledGame.Bundle bundle, File root) throws IOException {
+        opens.clear();
+        boolean refused = false;
+        try { BundledGame.prepare(this::open, bundle, root, progress); }
+        catch (IOException expected) {
+            require(expected.getMessage().contains("更新包不含游戏资源，请先安装完整版完成资源准备"),
+                "thin refusal did not explain the required full installation: " + expected);
+            refused = true;
+        }
+        require(refused, "thin bundle accepted missing or unprepared resources");
+        require(opens.isEmpty(), "refused thin bundle opened an archive asset");
     }
 
     private String benchmark() throws Exception {
@@ -214,12 +300,18 @@ public final class BundledGameInstrumentation extends Instrumentation {
     }
 
     private BundledGame.Bundle manifest(String id, String... files) throws Exception {
+        return manifest(id, false, files);
+    }
+
+    private BundledGame.Bundle manifest(String id, boolean preparedOnly, String... files) throws Exception {
         JSONArray entries = new JSONArray();
         for (String name : files) {
             String asset = "bundled/" + name;
             entries.put(entry(name, asset, assets.get(asset)));
         }
-        return new BundledGame.Bundle(new JSONObject().put("id", id).put("name", "合成安装测试").put("files", entries).toString());
+        JSONObject json = new JSONObject().put("id", id).put("name", "合成安装测试").put("files", entries);
+        if (preparedOnly) json.put("requiresPreparedResources", true);
+        return new BundledGame.Bundle(json.toString());
     }
 
     private static JSONObject entry(String name, String asset, byte[] bytes) throws Exception {

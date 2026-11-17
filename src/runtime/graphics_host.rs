@@ -203,7 +203,7 @@ impl GraphicsEffects {
         changed
     }
 
-    /// Trajectories and blocking step count from native 0x4183f0 / 0x418e70.
+    /// Native Effect modes 1..=6 (0x4183f0 through 0x419110).
     pub(super) fn screen_shake(
         &mut self,
         scene: &mut Scene,
@@ -213,46 +213,67 @@ impl GraphicsEffects {
         fast: bool,
         simplified: bool,
     ) -> Result<Duration> {
-        if !matches!(kind, 1 | 5) {
+        if !(1..=6).contains(&kind) {
             return Err(format!("unsupported Effect screen shake mode {kind}").into());
         }
         if !(0..=1024).contains(&amplitude) {
             return Err("Effect amplitude outside 0..1024".into());
         }
         let interval = if milliseconds < 0 {
-            if kind == 1 { 100 } else { 50 }
+            if kind <= 4 { 100 } else { 50 }
         } else {
             milliseconds.max(1)
         };
         let interval = if simplified {
-            (interval / if kind == 1 { 4 } else { 12 }).max(1)
+            (interval / if kind <= 4 { 4 } else { 12 }).max(1)
         } else {
             interval
         };
-        let half = amplitude / 2;
-        let quarter = half / 2;
-        let points = if kind == 1 {
-            vec![
+        // Mode 5 halves the supplied amplitude before constructing the same
+        // twelve-point trajectory as mode 6. Integer division matches x86's
+        // signed truncation (all accepted amplitudes here are nonnegative).
+        let scale = if kind == 5 { amplitude / 2 } else { amplitude };
+        let half = scale / 2;
+        let points = match kind {
+            1 => vec![
                 (0, amplitude),
                 (0, -amplitude),
                 (0, amplitude),
                 (0, -amplitude),
-            ]
-        } else {
-            vec![
+            ],
+            2 => vec![
+                (amplitude, 0),
+                (-amplitude, 0),
+                (amplitude, 0),
+                (-amplitude, 0),
+            ],
+            3 => vec![
+                (amplitude, -amplitude),
+                (-amplitude, amplitude),
+                (amplitude, -amplitude),
+                (-amplitude, amplitude),
+            ],
+            4 => vec![
+                (-amplitude, -amplitude),
+                (amplitude, amplitude),
+                (-amplitude, -amplitude),
+                (amplitude, amplitude),
+            ],
+            5 | 6 => vec![
+                (-scale, -scale),
+                (scale, -scale),
+                (-scale, scale),
+                (scale, scale),
                 (-half, -half),
-                (half, -half),
-                (-half, half),
-                (half, half),
-                (-quarter, -quarter),
-                (half, half),
-                (half, -half),
-                (-half, -half),
-                (-half, quarter),
-                (0, -half),
-                (-quarter, half),
-                (half, -half),
-            ]
+                (scale, scale),
+                (scale, -scale),
+                (-scale, -scale),
+                (-scale, half),
+                (0, -scale),
+                (-half, scale),
+                (scale, -scale),
+            ],
+            _ => unreachable!("Effect mode was validated above"),
         };
         if fast || amplitude == 0 {
             self.shake = None;
@@ -412,6 +433,210 @@ impl GraphicsEffects {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_six_native_shake_modes_follow_every_verified_step() -> Result<()> {
+        // Independent native fixtures at amplitude 7 also exercise the signed
+        // integer truncation in modes 5 and 6, rather than only even inputs.
+        let fixtures: [Vec<(i32, i32)>; 6] = [
+            vec![(0, 7), (0, -7), (0, 7), (0, -7)],
+            vec![(7, 0), (-7, 0), (7, 0), (-7, 0)],
+            vec![(7, -7), (-7, 7), (7, -7), (-7, 7)],
+            vec![(-7, -7), (7, 7), (-7, -7), (7, 7)],
+            vec![
+                (-3, -3),
+                (3, -3),
+                (-3, 3),
+                (3, 3),
+                (-1, -1),
+                (3, 3),
+                (3, -3),
+                (-3, -3),
+                (-3, 1),
+                (0, -3),
+                (-1, 3),
+                (3, -3),
+            ],
+            vec![
+                (-7, -7),
+                (7, -7),
+                (-7, 7),
+                (7, 7),
+                (-3, -3),
+                (7, 7),
+                (7, -7),
+                (-7, -7),
+                (-7, 3),
+                (0, -7),
+                (-3, 7),
+                (7, -7),
+            ],
+        ];
+        for (index, points) in fixtures.into_iter().enumerate() {
+            let mut scene = Scene::default();
+            let mut effects = GraphicsEffects::default();
+            let duration =
+                effects.screen_shake(&mut scene, index as i32 + 1, 20, 7, false, false)?;
+            assert_eq!(duration, Duration::from_millis(points.len() as u64 * 20));
+            let start = effects.shake.as_ref().unwrap().start;
+            for (step, point) in points.iter().enumerate() {
+                effects.tick_at(&mut scene, start + Duration::from_millis(step as u64 * 20));
+                assert_eq!(scene.shake_offset, *point, "mode {} step {step}", index + 1);
+                assert!(!effects.is_stable());
+            }
+            effects.tick_at(&mut scene, start + duration);
+            assert_eq!(scene.shake_offset, (0, 0));
+            assert!(effects.is_stable());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn shake_defaults_acceleration_and_fast_validation_cover_all_modes() -> Result<()> {
+        let mut scene = Scene::default();
+        let mut effects = GraphicsEffects::default();
+        for kind in 1..=6 {
+            let steps = if kind <= 4 { 4 } else { 12 };
+            let default_duration = if kind <= 4 { 400 } else { 600 };
+            assert_eq!(
+                effects.screen_shake(&mut scene, kind, -1, 7, false, false)?,
+                Duration::from_millis(default_duration)
+            );
+            assert_eq!(
+                effects.screen_shake(&mut scene, kind, 48, 7, false, true)?,
+                Duration::from_millis(48)
+            );
+            assert_eq!(
+                effects.screen_shake(&mut scene, kind, 0, 7, false, false)?,
+                Duration::from_millis(steps)
+            );
+            assert_eq!(
+                effects.screen_shake(&mut scene, kind, 20, 7, true, false)?,
+                Duration::ZERO
+            );
+            assert_eq!(scene.shake_offset, (0, 0));
+            assert!(effects.is_stable());
+            assert_eq!(
+                effects.screen_shake(&mut scene, kind, 20, 0, false, false)?,
+                Duration::ZERO
+            );
+            for fast in [false, true] {
+                assert!(
+                    effects
+                        .screen_shake(&mut scene, kind, 20, -1, fast, false)
+                        .is_err()
+                );
+                assert!(
+                    effects
+                        .screen_shake(&mut scene, kind, 20, 1025, fast, false)
+                        .is_err()
+                );
+            }
+        }
+        // The reported kaho_07 @1263 call must run even at amplitude 1.
+        assert_eq!(
+            effects.screen_shake(&mut scene, 2, 20, 1, false, false)?,
+            Duration::from_millis(80)
+        );
+        assert_eq!(scene.shake_offset, (1, 0));
+        for kind in [0, 7, 99] {
+            for fast in [false, true] {
+                assert!(
+                    effects
+                        .screen_shake(&mut scene, kind, 20, 7, fast, false)
+                        .is_err()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "read-only corpus audit; set YUKA_GAME_DIR to supplied original game"]
+    fn supplied_game_effect_calls_validate_without_fast_path_bypass() -> Result<()> {
+        use crate::{
+            archive::Archive,
+            script::{Element, InstructionKind, Script, TextEncoding},
+        };
+        let directory = std::env::var_os("YUKA_GAME_DIR").ok_or("set YUKA_GAME_DIR")?;
+        let mut archives = std::fs::read_dir(directory)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        archives.sort();
+        let mut scripts = 0;
+        let mut calls = 0;
+        let mut modes = BTreeMap::<i32, usize>::new();
+        for path in archives {
+            if !path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("ykc"))
+            {
+                continue;
+            }
+            let mut archive = Archive::open(path)?;
+            for index in 0..archive.entries.len() {
+                let name = archive.entries[index].name.clone();
+                if !name.to_ascii_lowercase().ends_with(".yks") {
+                    continue;
+                }
+                scripts += 1;
+                let script = Script::parse_with_encoding(
+                    &archive.read_entry(index, 16 * 1024 * 1024)?,
+                    TextEncoding::Gbk,
+                )?;
+                for instruction in script.disassemble()? {
+                    let Element::Function { name: function } =
+                        &script.entry(instruction.entry_index)?.element
+                    else {
+                        continue;
+                    };
+                    if function.text != "Effect" {
+                        continue;
+                    }
+                    let InstructionKind::Call { arguments } = instruction.kind else {
+                        unreachable!()
+                    };
+                    let arguments = arguments
+                        .into_iter()
+                        .map(|argument| match script.entry(argument)?.element {
+                            Element::Integer { value } => Ok(value),
+                            _ => Err(format!(
+                                "{name} @{}: nonliteral Effect argument needs VM audit",
+                                instruction.word_offset
+                            )
+                            .into()),
+                        })
+                        .collect::<Result<Vec<i32>>>()?;
+                    let kind = *arguments.first().ok_or("Effect needs a mode")?;
+                    let interval = arguments.get(1).copied().unwrap_or(-1);
+                    let amplitude = arguments.get(2).copied().unwrap_or(5);
+                    assert!(arguments.len() <= 3, "{name} @{}", instruction.word_offset);
+                    for (fast, simplified) in [(false, false), (false, true), (true, false)] {
+                        GraphicsEffects::default()
+                            .screen_shake(
+                                &mut Scene::default(),
+                                kind,
+                                interval,
+                                amplitude,
+                                fast,
+                                simplified,
+                            )
+                            .map_err(|error| {
+                                format!(
+                                    "{name} @{} Effect{arguments:?}: {error}",
+                                    instruction.word_offset
+                                )
+                            })?;
+                    }
+                    *modes.entry(kind).or_default() += 1;
+                    calls += 1;
+                }
+            }
+        }
+        assert!(calls > 0, "no Effect calls found in supplied game");
+        println!("Audited {scripts} scripts, {calls} Effect calls; modes {modes:?}");
+        Ok(())
+    }
 
     #[test]
     fn native_shake_sequences_block_reset_and_pause_without_position_drift() -> Result<()> {
