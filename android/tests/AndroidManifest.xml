@@ -16,4 +16,8 @@
         android:targetPackage="org.yukars.player" android:label="Yuka RS bundled resource installation" />
     <instrumentation android:name="org.yukars.player.OriginalUiInstrumentation"
         android:targetPackage="org.yukars.player" android:label="Yuka RS original save menu integration" />
+    <instrumentation android:name="org.yukars.player.PlaybackInstrumentation"
+        android:targetPackage="org.yukars.player" android:label="Yuka RS auto skip and dialogue history" />
+    <instrumentation android:name="org.yukars.player.ActivityControlsInstrumentation"
+        android:targetPackage="org.yukars.player" android:label="Yuka RS real activity reading controls" />
 </manifest>

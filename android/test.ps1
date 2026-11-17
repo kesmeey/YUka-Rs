@@ -13,7 +13,7 @@ param(
     [string]$Keystore = '',
     [string]$TargetPackage = 'org.yukars.player',
     [string]$XzJar = (Join-Path $PSScriptRoot '../target/android-libs/xz-1.12.jar'),
-    [ValidateSet('SmokeInstrumentation', 'AudioFocusInstrumentation', 'BundledGameInstrumentation', 'OriginalUiInstrumentation')][string]$Runner = 'SmokeInstrumentation',
+    [ValidateSet('SmokeInstrumentation', 'AudioFocusInstrumentation', 'BundledGameInstrumentation', 'OriginalUiInstrumentation', 'PlaybackInstrumentation', 'ActivityControlsInstrumentation')][string]$Runner = 'SmokeInstrumentation',
     [switch]$BuildOnly
 )
 $ErrorActionPreference = 'Stop'

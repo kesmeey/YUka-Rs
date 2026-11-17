@@ -5,6 +5,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Ndk,
     [string]$JavaHome = $env:JAVA_HOME,
     [string]$BundleDirectory = '',
+    [string]$IconExecutable = '',
+    [string]$OutputDirectory = '',
     [string]$XzJar = (Join-Path $PSScriptRoot '../target/android-libs/xz-1.12.jar'),
     [ValidateSet('arm64-v8a', 'x86_64')][string[]]$Abis = @('arm64-v8a', 'x86_64')
 )
@@ -12,7 +14,7 @@ $ErrorActionPreference = 'Stop'
 $project = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $bundled = -not [string]::IsNullOrWhiteSpace($BundleDirectory)
 $outputName = if ($bundled) { 'target/android-build-loverable' } else { 'target/android-build' }
-$output = Join-Path $project $outputName
+$output = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { Join-Path $project $outputName } else { [IO.Path]::GetFullPath($OutputDirectory) }
 $delivery = Join-Path $project 'bin'
 $platformJar = Join-Path $SdkPlatform 'android.jar'
 $ndkBin = Join-Path $Ndk 'toolchains/llvm/prebuilt/windows-x86_64/bin'
@@ -25,7 +27,22 @@ function Invoke-Checked([string]$Program, [string[]]$Arguments) {
 }
 New-Item -ItemType Directory -Force -Path $output, $delivery, "$output/classes", "$output/dex" | Out-Null
 $manifest = Join-Path $PSScriptRoot 'app/src/main/AndroidManifest.xml'
+$resourceZip = Join-Path $output 'compiled-resources.zip'
+Invoke-Checked "$BuildTools/aapt2.exe" @('compile', '--dir', "$PSScriptRoot/app/src/main/res", '-o', $resourceZip)
+$resourceArguments = @($resourceZip)
+if (-not [string]::IsNullOrWhiteSpace($IconExecutable)) {
+    $IconExecutable = (Resolve-Path -LiteralPath $IconExecutable).Path
+    $iconResources = Join-Path $output 'icon-res'
+    Invoke-Checked 'python' @("$PSScriptRoot/extract-icon.py", $IconExecutable, $iconResources)
+    $iconZip = Join-Path $output 'compiled-icon.zip'
+    Invoke-Checked "$BuildTools/aapt2.exe" @('compile', '--dir', $iconResources, '-o', $iconZip)
+    $resourceArguments += $iconZip
+}
 $bundleFiles = @()
+$bundleFiles += [PSCustomObject]@{Source=(Join-Path $project 'THIRD_PARTY_NOTICES.md'); Entry='assets/licenses/THIRD_PARTY_NOTICES.md'; Compression=[IO.Compression.CompressionLevel]::Optimal}
+foreach ($notice in (Get-ChildItem -LiteralPath "$PSScriptRoot/licenses" -File)) {
+    $bundleFiles += [PSCustomObject]@{Source=$notice.FullName; Entry=('assets/licenses/' + $notice.Name); Compression=[IO.Compression.CompressionLevel]::Optimal}
+}
 if ($bundled) {
     $BundleDirectory = (Resolve-Path -LiteralPath $BundleDirectory).Path
     $bundleJson = Join-Path $BundleDirectory 'bundled-game.json'
@@ -44,6 +61,12 @@ if ($bundled) {
     [xml]$manifestXml = Get-Content -LiteralPath $manifest -Raw -Encoding UTF8
     $manifestXml.manifest.SetAttribute('package', 'org.yukars.loverable')
     $manifestXml.manifest.application.SetAttribute('label', 'http://schemas.android.com/apk/res/android', [string]$bundle.name) | Out-Null
+    $manifest = Join-Path $output 'AndroidManifest.xml'
+    $manifestXml.Save($manifest)
+}
+if (-not [string]::IsNullOrWhiteSpace($IconExecutable)) {
+    [xml]$manifestXml = Get-Content -LiteralPath $manifest -Raw -Encoding UTF8
+    $manifestXml.manifest.application.SetAttribute('icon', 'http://schemas.android.com/apk/res/android', '@drawable/ic_game_icon') | Out-Null
     $manifest = Join-Path $output 'AndroidManifest.xml'
     $manifestXml.Save($manifest)
 }
@@ -80,7 +103,7 @@ try {
         }
     } finally { $xzBaseline.Dispose(); $xzSource.Dispose() }
     Invoke-Checked "$BuildTools/d8.bat" @('--release', '--min-api', '26', '--lib', $platformJar, '--output', "$output/dex", "$output/classes.jar", "$output/xz-baseline.jar")
-    Invoke-Checked "$BuildTools/aapt2.exe" @('link', '--manifest', $manifest, '-I', $platformJar, '--min-sdk-version', '26', '--target-sdk-version', '35', '-o', "$output/resources.apk")
+    Invoke-Checked "$BuildTools/aapt2.exe" (@('link', '--manifest', $manifest, '-I', $platformJar, '--min-sdk-version', '26', '--target-sdk-version', '35', '-o', "$output/resources.apk") + $resourceArguments)
     # Create mode streams multi-gigabyte assets directly to disk. Update mode buffers added entries.
     $archive = [IO.Compression.ZipArchive]::new([IO.File]::Open("$output/unsigned.apk", [IO.FileMode]::Create), [IO.Compression.ZipArchiveMode]::Create)
     $resourceArchive = [IO.Compression.ZipFile]::OpenRead("$output/resources.apk")
@@ -108,7 +131,7 @@ try {
         Invoke-Checked "$JavaHome/bin/keytool.exe" @('-genkeypair', '-keystore', $keystore, '-storepass', 'android', '-keypass', 'android', '-alias', 'yuka-rs', '-keyalg', 'RSA', '-keysize', '2048', '-validity', '10000', '-dname', 'CN=Yuka-Rs Development', '-noprompt')
     }
     Invoke-Checked "$BuildTools/zipalign.exe" @('-f', '-P', '16', '4', "$output/unsigned.apk", "$output/aligned.apk")
-    $apkName = if ($bundled) { 'Loverable-Yuka-Rs-0.2.2.apk' } else { 'Yuka-Rs-0.2.2.apk' }
+    $apkName = if ($bundled) { 'Loverable-Yuka-Rs-0.2.3.apk' } else { 'Yuka-Rs-0.2.3.apk' }
     $apk = Join-Path $delivery $apkName
     Invoke-Checked "$BuildTools/apksigner.bat" @('sign', '--ks', $keystore, '--ks-key-alias', 'yuka-rs', '--ks-pass', 'pass:android', '--key-pass', 'pass:android', '--out', $apk, "$output/aligned.apk")
     Invoke-Checked "$BuildTools/apksigner.bat" @('verify', '--verbose', $apk)

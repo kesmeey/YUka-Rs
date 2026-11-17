@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.yukars.player"
-    android:versionCode="3" android:versionName="0.2.2">
+    android:versionCode="4" android:versionName="0.2.3">
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
-    <application android:label="Yuka RS" android:theme="@android:style/Theme.Material.Light.NoActionBar"
+    <application android:label="Yuka RS" android:icon="@drawable/ic_launcher" android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:allowBackup="false" android:hasCode="true" android:extractNativeLibs="true"
         android:supportsRtl="true" android:enableOnBackInvokedCallback="true">
         <activity android:name="org.yukars.player.MainActivity" android:exported="true" android:screenOrientation="sensorLandscape"

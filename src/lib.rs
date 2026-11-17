@@ -1,6 +1,8 @@
 //! Platform-independent formats for the reconstruction of the Yuka engine.
 #[cfg(target_os = "android")]
 mod android;
+#[cfg(any(target_os = "android", test))]
+mod android_bundle;
 pub mod archive;
 pub mod desktop;
 pub mod graphics;

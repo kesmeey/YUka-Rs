@@ -8,6 +8,8 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.FilterInputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.security.MessageDigest;
@@ -15,11 +17,13 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Random;
 import java.util.UUID;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.tukaani.xz.LZMA2Options;
 import org.tukaani.xz.XZOutputStream;
+import org.tukaani.xz.XZInputStream;
 
 /** Exercises bundled installation independently of the multi-gigabyte game payload. */
 public final class BundledGameInstrumentation extends Instrumentation {
@@ -27,12 +31,17 @@ public final class BundledGameInstrumentation extends Instrumentation {
     private final Map<String, byte[]> assets = new HashMap<>();
     private final Map<String, Integer> opens = new HashMap<>();
     private boolean cancelled;
+    private boolean benchmark;
     private final GameImporter.Progress progress = new GameImporter.Progress() {
         public void update(String message) { }
         public boolean cancelled() { return cancelled; }
     };
 
-    @Override public void onCreate(Bundle arguments) { super.onCreate(arguments); start(); }
+    @Override public void onCreate(Bundle arguments) {
+        super.onCreate(arguments);
+        benchmark = "true".equals(arguments.getString("benchmark"));
+        start();
+    }
     @Override public void onStart() { new Thread(this::runTest, "Yuka bundled install regression").start(); }
 
     private void runTest() {
@@ -130,9 +139,38 @@ public final class BundledGameInstrumentation extends Instrumentation {
             assets.put("bundled/data01.ykc.xz", xzBytes);
             BundledGame.prepare(this::open, xzBundle, root, progress);
             assertBytes(new File(xzDirectory, "data01.ykc"), original);
+            stage = "native_xz_large_buffers";
+            byte[] large = new byte[3 * 1024 * 1024 + 71];
+            new Random(42).nextBytes(large);
+            System.arraycopy(large, 0, large, 1024 * 1024, 1024 * 1024);
+            compressed.reset();
+            try (XZOutputStream output = new XZOutputStream(compressed, new LZMA2Options(3))) { output.write(large); }
+            byte[] largeXz = compressed.toByteArray();
+            ByteArrayOutputStream decoded = new ByteArrayOutputStream();
+            byte[] buffer = new byte[1024 * 1024];
+            try (InputStream input = new NativeXzInputStream(new ByteArrayInputStream(largeXz))) {
+                int count;
+                while ((count = input.read(buffer)) != -1) decoded.write(buffer, 0, count);
+            }
+            require(Arrays.equals(decoded.toByteArray(), large), "native XZ large buffers changed bytes");
+            stage = "native_xz_tiny_input";
+            try (InputStream input = new NativeXzInputStream(new FilterInputStream(new ByteArrayInputStream(xzBytes)) {
+                @Override public int read(byte[] bytes, int offset, int length) throws IOException {
+                    return super.read(bytes, offset, Math.min(length, 1));
+                }
+            })) {
+                decoded.reset();
+                int count;
+                while ((count = input.read(buffer, 7, 3)) != -1) decoded.write(buffer, 7, count);
+                require(Arrays.equals(decoded.toByteArray(), original), "native XZ tiny input changed bytes");
+            }
+            if (benchmark) {
+                stage = "real_xz_benchmark";
+                result.putString("benchmark", benchmark());
+            }
             result.putString("summary", "{\"passed\":true,\"bundled_install\":true,\"interrupted_resume\":true,"
                 + "\"unchanged_restart\":true,\"update_preserves_saves\":true,\"checksum_failure_preserves_current\":true,"
-                + "\"xz_extraction\":true,\"xz_truncated_retry\":true}");
+                + "\"xz_extraction\":true,\"xz_truncated_retry\":true,\"native_xz_large_buffers\":true,\"native_xz_tiny_input\":true}");
             code = Activity.RESULT_OK;
         } catch (Throwable error) { result.putString("failure", stage + " - " + error); }
         finally {
@@ -140,6 +178,32 @@ public final class BundledGameInstrumentation extends Instrumentation {
             catch (IOException error) { result.putString("cleanup_error", error.toString()); }
             finish(code, result);
         }
+    }
+
+    private String benchmark() throws Exception {
+        final long sample = 128L * 1024 * 1024;
+        long[] elapsed = new long[2];
+        byte[][] hashes = new byte[2][];
+        for (int nativeDecoder = 0; nativeDecoder < 2; nativeDecoder++) {
+            MessageDigest hash = MessageDigest.getInstance("SHA-256");
+            long start = android.os.SystemClock.elapsedRealtime();
+            try (InputStream raw = getTargetContext().getAssets().open("bundled/data03.ykc.xz");
+                 InputStream input = nativeDecoder == 0 ? new XZInputStream(raw, 100 * 1024) : new NativeXzInputStream(raw)) {
+                byte[] buffer = new byte[1024 * 1024];
+                long read = 0;
+                while (read < sample) {
+                    int count = input.read(buffer, 0, (int)Math.min(buffer.length, sample - read));
+                    require(count > 0, "benchmark resource ended early");
+                    hash.update(buffer, 0, count);
+                    read += count;
+                }
+            }
+            hashes[nativeDecoder] = hash.digest();
+            elapsed[nativeDecoder] = android.os.SystemClock.elapsedRealtime() - start;
+        }
+        require(Arrays.equals(hashes[0], hashes[1]), "Java/native real archive benchmark hash differs");
+        return new JSONObject().put("bytes", sample).put("java_xz_ms", elapsed[0])
+            .put("native_xz_ms", elapsed[1]).put("same_sha256", true).toString();
     }
 
     private ByteArrayInputStream open(String name) throws IOException {

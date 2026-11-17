@@ -92,6 +92,14 @@ fn sprite_frames(
 }
 
 impl GraphicsEffects {
+    pub(super) fn finish_transitions(&mut self, scene: &mut Scene) {
+        for (slot, animation) in std::mem::take(&mut self.opacity) {
+            if let Some(layer) = scene.layers.get_mut(&slot) {
+                layer.opacity = animation.to;
+            }
+        }
+    }
+
     pub(super) fn clear_slot(&mut self, slot: i32, scene: &mut Scene) {
         self.opacity.remove(&slot);
         self.sprites.retain(|&(parent, id), sprite| {

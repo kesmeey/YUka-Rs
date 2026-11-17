@@ -23,6 +23,14 @@ fn normalize(name: &[u8]) -> Vec<u8> {
 }
 
 impl NativeGlobals {
+    pub(super) fn contains(&self, script: &str, pc: u32) -> bool {
+        let name = normalize(script.as_bytes());
+        self.already.entries.iter().any(|entry| {
+            normalize(&entry.name) == name
+                && entry.marks.get(pc as usize).is_some_and(|mark| *mark != 0)
+        })
+    }
+
     // Native dispatcher 0x442483..0x4424bb marks the current code word before execution.
     pub(super) fn mark(&mut self, script: &str, words: usize, pc: u32) {
         let name = normalize(script.as_bytes());

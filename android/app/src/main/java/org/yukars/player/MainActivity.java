@@ -60,6 +60,10 @@ public final class MainActivity extends Activity {
     private FrameLayout gameContainer;
     private EditText remarkField;
     private OriginalSaveMenu slotMenu;
+    private OriginalHistoryMenu historyMenu;
+    private Mode historyReturnMode;
+    private HistoryAudio historyAudio;
+    private int historyRequest;
     private Mode slotReturnMode;
     private int slotRequest;
     private SharedPreferences preferences;
@@ -79,6 +83,7 @@ public final class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        historyAudio = new HistoryAudio(this);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         preferences = getSharedPreferences("player", MODE_PRIVATE);
         gameView = new GameView();
@@ -244,6 +249,8 @@ public final class MainActivity extends Activity {
 
     private void call(String operation, String argument) {
         boolean replacing = operation.equals("new") || operation.equals("load") || operation.equals("title");
+        if (replacing || (operation.equals("pause") && argument.equals("1")))
+            NativeBridge.command(session, "playback", "manual");
         if (replacing) audio.reset();
         NativeBridge.command(session, operation, argument);
         if (replacing) engineFailed = false;
@@ -254,6 +261,7 @@ public final class MainActivity extends Activity {
     }
 
     private void resumePlayback() {
+        clearHistory();
         clearSlotMenu();
         command("pause", "0", () -> {
             mode = Mode.PLAYING;
@@ -266,6 +274,72 @@ public final class MainActivity extends Activity {
         mode = Mode.PAUSED;
         command("pause", "1", null);
         gameView.invalidate();
+    }
+
+    private void toggleAuto() {
+        command("playback", gameView.playback().equals("auto") ? "manual" : "auto", null);
+    }
+
+    private void toggleSkip() {
+        if (!gameView.playback().equals("manual")) { command("playback", "manual", null); return; }
+        new AlertDialog.Builder(this).setTitle("快进方式")
+            .setItems(new String[]{"已读快进（遇到未读停止）", "全部快进（包括未读对话）"}, (dialog, index) -> {
+                if (index == 0 && !gameView.currentRead()) { toast("当前是未读对话，已读快进会在此停止"); return; }
+                command("playback", index == 0 ? "skip_read" : "skip_all", null);
+            }).setNegativeButton("取消", null).show();
+    }
+
+    private void openHistory() {
+        if (busy || actionPending || !nativeReady || gameView.originalAssets == null) return;
+        Mode previous = mode;
+        command("pause", "1", () -> {
+            historyReturnMode = previous;
+            mode = Mode.PAUSED;
+            int request = ++historyRequest;
+            engine.post(() -> {
+                try {
+                    JSONArray entries = new JSONArray(NativeBridge.history(session));
+                    ui.post(() -> {
+                        if (destroyed || request != historyRequest) return;
+                        historyMenu = new OriginalHistoryMenu(gameView.originalAssets, entries, new OriginalHistoryMenu.Listener() {
+                            public void close() { closeHistory(); }
+                            public void voice(long id) { replayHistory(id); }
+                        });
+                        gameView.invalidate();
+                    });
+                } catch (Exception error) { showError(error); }
+            });
+        });
+    }
+
+    private void replayHistory(long id) {
+        OriginalHistoryMenu menu = historyMenu;
+        if (menu == null) return;
+        historyAudio.stop();
+        int request = ++historyRequest;
+        engine.post(() -> {
+            try {
+                JSONArray paths = new JSONArray(NativeBridge.historyVoice(session, id));
+                ui.post(() -> {
+                    if (!destroyed && !background && historyMenu == menu && request == historyRequest)
+                        historyAudio.play(paths);
+                    else for (int index = 0; index < paths.length(); index++) new File(paths.optString(index)).delete();
+                });
+            } catch (Exception error) { showError(error); }
+        });
+    }
+
+    private void clearHistory() {
+        historyMenu = null;
+        historyRequest++;
+        historyAudio.stop();
+    }
+
+    private void closeHistory() {
+        Mode previous = historyReturnMode;
+        clearHistory();
+        if (previous == Mode.PLAYING) resumePlayback();
+        else { mode = previous; gameView.invalidate(); }
     }
 
     private void save(File path) {
@@ -603,6 +677,7 @@ public final class MainActivity extends Activity {
 
     private void navigateBack() {
         if (busy || actionPending) { toast("正在处理资源，请稍候"); return; }
+        if (historyMenu != null) { closeHistory(); return; }
         if (slotMenu != null) {
             if (slotMenu.confirming()) cancelSaveConfirmation();
             else closeSlotMenu();
@@ -616,9 +691,12 @@ public final class MainActivity extends Activity {
 
     @Override protected void onPause() {
         background = true;
+        historyRequest++;
+        historyAudio.stop();
         if (engine != null) engine.post(() -> {
             if (session != 0) {
                 try {
+                    NativeBridge.command(session, "playback", "manual");
                     NativeBridge.command(session, "pause", "1");
                     JSONObject state = new JSONObject(NativeBridge.state(session));
                     audio.apply(state.optJSONArray("audio"));
@@ -644,6 +722,7 @@ public final class MainActivity extends Activity {
 
     @Override protected void onDestroy() {
         destroyed = true;
+        historyAudio.stop();
         if (engine != null) {
             engine.removeCallbacks(frame);
             engine.post(() -> {
@@ -667,6 +746,8 @@ public final class MainActivity extends Activity {
         private float pressedY = -1;
         private float touchStartX;
         private float touchStartY;
+        private float touchLastY;
+        private boolean historyDragged;
         private boolean hideText;
         private float scale = 1f;
         private float left;
@@ -681,6 +762,8 @@ public final class MainActivity extends Activity {
             textPaint.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
         }
         boolean canSave() { synchronized (frameLock) { return state.optBoolean("can_save"); } }
+        String playback() { synchronized (frameLock) { return state.optString("playback", "manual"); } }
+        boolean currentRead() { synchronized (frameLock) { return state.optBoolean("current_read"); } }
         int stateInteger(String key, int fallback) { synchronized (frameLock) { return state.optInt(key, fallback); } }
         void update(int[] data, JSONObject nextState) {
             synchronized (frameLock) { bitmap.setPixels(data, 0, WIDTH, 0, 0, WIDTH, HEIGHT); state = nextState; }
@@ -698,7 +781,8 @@ public final class MainActivity extends Activity {
             synchronized (frameLock) {
                 canvas.drawBitmap(bitmap, 0, 0, paint);
                 buttons.clear();
-                if (slotMenu != null) slotMenu.draw(canvas, pressedX, pressedY);
+                if (historyMenu != null) historyMenu.draw(canvas, pressedX, pressedY);
+                else if (slotMenu != null) slotMenu.draw(canvas, pressedX, pressedY);
                 else if (mode == Mode.PLAYING) drawStory(canvas);
                 else drawMenu(canvas);
                 if (!message.isEmpty()) {
@@ -745,13 +829,14 @@ public final class MainActivity extends Activity {
                 originalButton(canvas, "sys_btn01", 4, 9, "LOAD", 684, 580, 72, 16,
                     nativeReady, MainActivity.this::loadMenu);
                 originalButton(canvas, "sys_btn02", 0, 8, "×", 761, 497, 38, 21, true,
-                    () -> { hideText = true; invalidate(); });
-                originalButton(canvas, "sys_btn02", 1, 9, "▶", 761, 520, 38, 21, true,
-                    () -> toast("自动阅读功能尚未实现"));
-                originalButton(canvas, "sys_btn02", 2, 10, "▶▶", 761, 543, 38, 21, true,
-                    () -> toast("已读快进功能尚未实现"));
+                    () -> command("playback", "manual", () -> { hideText = true; invalidate(); }));
+                String playback = state.optString("playback", "manual");
+                originalButton(canvas, "sys_btn02", playback.equals("auto") ? 5 : 1, 9, "▶", 761, 520, 38, 21, true,
+                    MainActivity.this::toggleAuto);
+                originalButton(canvas, "sys_btn02", playback.startsWith("skip") ? 6 : 2, 10, "▶▶", 761, 543, 38, 21, true,
+                    MainActivity.this::toggleSkip);
                 originalButton(canvas, "sys_btn02", 3, 11, "◀◀", 761, 566, 38, 21, true,
-                    () -> toast("原版对话履历功能尚未实现"));
+                    MainActivity.this::openHistory);
                 drawButtonHelp(canvas);
             }
             JSONArray choices = state.optJSONArray("choices");
@@ -769,6 +854,12 @@ public final class MainActivity extends Activity {
                     add(canvas, choices.optString(index), 130, start + index * row, 540, row - 5, true,
                         () -> command("choose", Integer.toString(selected), null));
                 }
+            }
+            String playback = state.optString("playback", "manual");
+            if (!playback.equals("manual")) {
+                rect(canvas, 10, 10, 220, 30, 0xb0102636);
+                text(canvas, playback.equals("auto") ? "自动阅读 · 点击画面停止"
+                    : (playback.equals("skip_read") ? "已读快进 · 点击停止" : "全部快进 · 点击停止"), 18, 31, 17, Color.WHITE);
             }
         }
 
@@ -902,14 +993,30 @@ public final class MainActivity extends Activity {
             float y = (event.getY() - top) / scale;
             if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
                 touchStartX = x; touchStartY = y; pressedX = x; pressedY = y;
+                touchLastY = y; historyDragged = false;
+                if (historyMenu != null && historyMenu.begin(x, y)) historyDragged = true;
                 invalidate(); return true;
             }
-            if (event.getActionMasked() == MotionEvent.ACTION_MOVE) { pressedX = x; pressedY = y; invalidate(); return true; }
-            if (event.getActionMasked() == MotionEvent.ACTION_CANCEL) { pressedX = -1; pressedY = -1; invalidate(); return true; }
+            if (event.getActionMasked() == MotionEvent.ACTION_MOVE) {
+                if (historyMenu != null) {
+                    if (Math.abs(y - touchStartY) > 10) historyDragged = true;
+                    if (historyDragged) historyMenu.drag(x, y, y - touchLastY);
+                }
+                touchLastY = y; pressedX = x; pressedY = y; invalidate(); return true;
+            }
+            if (event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
+                if (historyMenu != null) historyMenu.end();
+                pressedX = -1; pressedY = -1; invalidate(); return true;
+            }
             if (event.getActionMasked() != MotionEvent.ACTION_UP) return true;
             pressedX = -1; pressedY = -1; invalidate();
             performClick();
             if (x < 0 || y < 0 || x >= WIDTH || y >= HEIGHT || busy || actionPending) return true;
+            if (historyMenu != null) {
+                historyMenu.end();
+                if (!historyDragged) historyMenu.tap(x, y);
+                return true;
+            }
             if (Math.abs(x - touchStartX) > 20 || Math.abs(y - touchStartY) > 20) return true;
             if (slotMenu != null) { slotMenu.tap(x, y); return true; }
             for (Button button : buttons) {
@@ -918,7 +1025,8 @@ public final class MainActivity extends Activity {
             synchronized (frameLock) {
                 JSONArray choices = state.optJSONArray("choices");
                 if (mode == Mode.PLAYING && (choices == null || choices.length() == 0)) {
-                    if (hideText) { hideText = false; invalidate(); }
+                    if (!playback().equals("manual")) command("playback", "manual", null);
+                    else if (hideText) { hideText = false; invalidate(); }
                     else command("advance", "", null);
                 }
             }

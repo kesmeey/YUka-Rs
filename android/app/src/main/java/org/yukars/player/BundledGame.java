@@ -24,7 +24,6 @@ import java.util.Iterator;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
-import org.tukaani.xz.XZInputStream;
 
 /** Streams the signed APK's archives into seekable files, preserving the game's Save directory. */
 final class BundledGame {
@@ -154,9 +153,10 @@ final class BundledGame {
         catch (NoSuchAlgorithmException error) { throw new IOException("设备不支持 SHA-256", error); }
         long copied = 0;
         long lastUpdate = 0;
+        long started = SystemClock.elapsedRealtime();
         byte[] buffer = new byte[1024 * 1024];
         try (InputStream raw = assets.open(resource.asset);
-             InputStream input = resource.encoding.equals("xz") ? new XZInputStream(raw, 100 * 1024) : raw;
+             InputStream input = resource.encoding.equals("xz") ? new NativeXzInputStream(raw) : raw;
              FileOutputStream output = new FileOutputStream(partial)) {
             int count;
             while ((count = input.read(buffer)) != -1) {
@@ -167,7 +167,17 @@ final class BundledGame {
                 copied += count;
                 long now = SystemClock.elapsedRealtime();
                 if (now - lastUpdate >= 250) {
-                    showProgress(progress, bundle, resource, completed + copied, index);
+                    String message = progressText(bundle, resource, completed + copied, index);
+                    long elapsed = now - started;
+                    if (elapsed >= 500 && copied > 0) {
+                        double bytesPerSecond = copied * 1000.0 / elapsed;
+                        long remainingSeconds = (long)Math.ceil((bundle.bytes - completed - copied) / bytesPerSecond);
+                        message += String.format(Locale.ROOT, "\n原生%s · %.1f MiB/s · 约剩%s",
+                            resource.encoding.equals("xz") ? "解压" : "复制", bytesPerSecond / (1024 * 1024),
+                            remainingSeconds >= 60 ? (remainingSeconds / 60) + "分" + (remainingSeconds % 60) + "秒"
+                                : remainingSeconds + "秒");
+                    }
+                    progress.update(message);
                     lastUpdate = now;
                 }
             }
@@ -188,9 +198,13 @@ final class BundledGame {
     }
 
     private static void showProgress(GameImporter.Progress progress, Bundle bundle, Resource resource, long bytes, int index) {
-        progress.update("正在准备 " + bundle.name + " · " + (int) (100.0 * bytes / bundle.bytes) + "%\n"
+        progress.update(progressText(bundle, resource, bytes, index));
+    }
+
+    private static String progressText(Bundle bundle, Resource resource, long bytes, int index) {
+        return "正在准备 " + bundle.name + " · " + (int) (100.0 * bytes / bundle.bytes) + "%\n"
             + resource.name + "（" + index + "/" + bundle.files.size() + "）· " + (bytes / (1024 * 1024))
-            + " / " + (bundle.bytes / (1024 * 1024)) + " MiB");
+            + " / " + (bundle.bytes / (1024 * 1024)) + " MiB";
     }
 
     private static void checkCancelled(GameImporter.Progress progress) throws IOException {

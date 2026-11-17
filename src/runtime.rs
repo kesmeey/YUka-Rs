@@ -22,8 +22,10 @@ mod native_globals;
 mod native_persistence;
 mod native_thumbnail;
 mod persistence;
+mod playback;
 mod ui;
 use graphics_host::GraphicsEffects;
+pub use playback::{DialogueEntry, PlaybackMode};
 pub use ui::SaveInfo;
 
 struct Activation {
@@ -101,6 +103,7 @@ pub struct Runtime {
     end_reason: Option<String>,
     native_globals: native_globals::NativeGlobals,
     native_template: Option<crate::native_save::NativeSave>,
+    playback: playback::Playback,
 }
 
 fn int(arguments: &[Value], index: usize) -> Result<i32> {
@@ -227,6 +230,7 @@ impl Runtime {
             end_reason: None,
             native_globals: native_globals::NativeGlobals::default(),
             native_template: None,
+            playback: playback::Playback::default(),
         };
         Ok(runtime)
     }
@@ -268,6 +272,7 @@ impl Runtime {
             return Ok(());
         }
         if self.scene.finished {
+            self.set_playback_mode("manual")?;
             return Ok(());
         }
         if matches!(self.waiting, Waiting::Key) {
@@ -327,6 +332,7 @@ impl Runtime {
             self.drive()?;
             changed = true;
         }
+        changed |= self.tick_playback()?;
         Ok(changed)
     }
 
@@ -348,6 +354,9 @@ impl Runtime {
     fn drive(&mut self) -> Result<()> {
         for _ in 0..20000 {
             if self.scene.finished || !matches!(self.waiting, Waiting::Ready) {
+                if self.scene.finished || matches!(self.waiting, Waiting::Choice) {
+                    self.set_playback_mode("manual")?;
+                }
                 self.status();
                 if self.autosave_requested
                     && self.can_save()
@@ -369,6 +378,7 @@ impl Runtime {
             if let Some(name) = self.resources.script_name(current.vm.current_script()) {
                 current.name = name.to_owned();
             }
+            let was_read = self.native_globals.contains(&current.name, current.vm.pc);
             self.native_globals.mark(
                 &current.name,
                 current.vm.current_script().code.len(),
@@ -394,6 +404,7 @@ impl Runtime {
                 } => {
                     *self.commands.entry(function.clone()).or_default() += 1;
                     if function == "Select" {
+                        self.set_playback_mode("manual")?;
                         self.scene.choices = self
                             .stack
                             .last()
@@ -453,6 +464,9 @@ impl Runtime {
                         vm.replace_shared_memory(memory)?;
                         self.stack.push(Activation { name, vm });
                     } else {
+                        if function == "KeyWait" {
+                            self.playback.current_read = was_read;
+                        }
                         let result = self.host(&function, &arguments).map_err(|e| {
                             format!(
                                 "{} @{word_offset} {function}: {e}",
@@ -469,13 +483,13 @@ impl Runtime {
     }
 
     fn wait(&mut self, milliseconds: i32) {
-        if !self.fast && milliseconds > 0 {
+        if !self.fast_execution() && milliseconds > 0 {
             self.waiting = Waiting::Timer(Instant::now() + duration(milliseconds));
         }
     }
 
     fn transition(&mut self, milliseconds: i32) {
-        if !self.fast && milliseconds > 0 {
+        if !self.fast_execution() && milliseconds > 0 {
             self.scene.transition_from = self.draw_before.take();
             self.scene.transition_progress = 0.0;
             self.fade = Some(Fade {
@@ -491,13 +505,14 @@ impl Runtime {
     }
 
     fn host(&mut self, function: &str, args: &[Value]) -> Result<Option<Value>> {
+        let fast = self.fast_execution();
         if self.effects.handle(
             function,
             args,
             &mut self.scene,
             &mut self.resources,
             &mut self.layer_sources,
-            self.fast,
+            fast,
         )? {
             return Ok(None);
         }
@@ -538,11 +553,12 @@ impl Runtime {
                 self.draw_before = None;
             }
             "SoundStopALL" => self.sound.stop_all(),
-            "HistoryReset" => {}
-            "ScriptSkipReset" => {}
-            "ScriptSkipMode" => {
-                let _ = int(args, 0)?;
-            }
+            "HistoryReset" => self.reset_history(),
+            "ScriptSkipReset" => self.reset_script_playback()?,
+            "ScriptSkipMode" => self.script_skip_mode(int(args, 0)?)?,
+            "SkipModeSet" => self.set_playback_mode("skip_all")?,
+            "AlreadySkipModeSet" => self.set_playback_mode("skip_read")?,
+            "AutoModeSet" => self.set_playback_mode("auto")?,
             "SakuraEffect" if args.is_empty() => {}
             "TimerStart" => {
                 self.timers.insert(int(args, 0)?, Instant::now());
@@ -554,7 +570,7 @@ impl Runtime {
                     .get(&id)
                     .ok_or("TimerWait references an unstarted timer")?;
                 let deadline = *start + duration(int(args, 1)?);
-                if !self.fast && deadline > Instant::now() {
+                if !fast && deadline > Instant::now() {
                     self.waiting = Waiting::Timer(deadline);
                 }
             }
@@ -577,7 +593,14 @@ impl Runtime {
             }
             "LF" => self.scene.dialogue.push('\n'),
             "SkipModeCheck" | "AlreadySkipModeCheck" | "AutoModeCheck" => {
-                return Ok(Some(Value::Integer(0)));
+                let expected = match function {
+                    "SkipModeCheck" => PlaybackMode::SkipAll,
+                    "AlreadySkipModeCheck" => PlaybackMode::SkipRead,
+                    _ => PlaybackMode::Auto,
+                };
+                return Ok(Some(Value::Integer(i32::from(
+                    self.playback_mode() == expected,
+                ))));
             }
             "DrawStop" => self.draw_before = Some(self.scene.layers.clone()),
             "GraphicLoad" | "GraphicLoadHide" => {
@@ -676,7 +699,7 @@ impl Runtime {
                     return Ok(None);
                 };
                 self.scrolls.retain(|scroll| scroll.slot != slot);
-                if self.fast || milliseconds <= 0 {
+                if fast || milliseconds <= 0 {
                     layer.x = to.0;
                     layer.y = to.1;
                 } else {
@@ -710,6 +733,7 @@ impl Runtime {
             "KeyWait" => {
                 self.pages += 1;
                 self.waiting = Waiting::Key;
+                self.record_dialogue();
             }
             "PF" => {
                 self.page_voice_paths.clear();
@@ -760,7 +784,7 @@ impl Runtime {
             "SoundDeleteToFade" => {
                 let milliseconds = if args.len() > 1 { int(args, 1)? } else { 1000 };
                 self.sound
-                    .fade_delete(int(args, 0)?, if self.fast { 0 } else { milliseconds });
+                    .fade_delete(int(args, 0)?, if fast { 0 } else { milliseconds });
             }
             "SoundVolume" => self.sound.volume(int(args, 0)?, int(args, 1)?),
             "SoundVolumeToFade" => {
@@ -768,11 +792,11 @@ impl Runtime {
                 self.sound.fade_volume(
                     int(args, 0)?,
                     int(args, 1)?,
-                    if self.fast { 0 } else { milliseconds },
+                    if fast { 0 } else { milliseconds },
                 );
             }
             "SoundPlayWait" => {
-                if !self.fast && self.sound.is_playing(int(args, 0)?) {
+                if !fast && self.sound.is_playing(int(args, 0)?) {
                     self.waiting = Waiting::Sound(int(args, 0)?);
                 }
             }

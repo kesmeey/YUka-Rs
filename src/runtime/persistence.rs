@@ -111,6 +111,7 @@ impl Runtime {
             for timer in self.timers.values_mut() {
                 *timer += elapsed;
             }
+            self.shift_playback_time(elapsed);
         }
         self.sound.set_paused(paused);
     }
@@ -400,6 +401,8 @@ impl Runtime {
         self.fade = None;
         self.draw_before = None;
         self.sound.set_paused(self.paused_at.is_some());
+        self.playback = super::playback::Playback::default();
+        self.record_dialogue();
         self.approximations
             .insert("Audio restarts at the beginning after loading a save".into());
         self.status();

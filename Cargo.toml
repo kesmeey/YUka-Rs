@@ -1,6 +1,6 @@
 [package]
 name = "yuka-rs"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "Yuka engine reconstruction and binary format research tools"
@@ -22,4 +22,8 @@ rodio = { version = "=0.20.1", default-features = false, features = ["vorbis"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "=0.21.1"
+lzma-rust2 = { version = "=0.25.0", default-features = false, features = ["std", "xz", "optimization"] }
+
+[dev-dependencies]
+lzma-rust2 = { version = "=0.25.0", default-features = false, features = ["std", "xz", "optimization"] }
 

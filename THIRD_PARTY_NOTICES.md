@@ -39,10 +39,20 @@ IN THE SOFTWARE.
 local inspection results. Both are ignored by Git along with extracted assets.
 Game resources and the Windows executable are supplied separately by the user.
 
+## lzma-rust2 0.25.0
+
+The Android asset importer uses the native Rust `lzma-rust2` decoder, with
+bounded streaming buffers and a 100 MiB decoder-memory limit, to prepare the
+losslessly compressed game archives. The library is distributed under the
+Apache License 2.0. Its complete upstream license is retained in
+`android/licenses/lzma-rust2-LICENSE.txt`.
+[Project](https://github.com/hasenbanck/lzma-rust2/),
+[pinned source](https://docs.rs/crate/lzma-rust2/0.25.0/source/).
+
 ## XZ for Java 1.12
 
-The Android asset importer uses XZ for Java 1.12 (`org.tukaani:xz:1.12`) to
-decompress bundled game archives. XZ for Java is distributed under the BSD Zero
+Android instrumentation uses XZ for Java 1.12 (`org.tukaani:xz:1.12`) to
+create independent test fixtures and benchmark the former decoder. XZ for Java is distributed under the BSD Zero
 Clause License (0BSD). The complete upstream license is reproduced below.
 [Project](https://tukaani.org/xz/java.html),
 [version 1.12 license](https://github.com/tukaani-project/xz-java/blob/v1.12/COPYING).

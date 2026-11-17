@@ -8,10 +8,11 @@
 
 ## 《情侣热恋中》完整游戏 APK
 
-`bin/Loverable-Yuka-Rs-0.2.2.apk` 将 Rust 引擎与本机汉化版的五个原始 `data*.ykc` 资源包一起打包。
+`bin/Loverable-Yuka-Rs-0.2.3.apk` 将 Rust 引擎与本机汉化版的五个原始 `data*.ykc` 资源包一起打包。
 应用包名为 `org.yukars.loverable`，最低版本为 Android 8.0，包含 `arm64-v8a` 和 `x86_64`。
 APK 约 2.93 GiB，使用开发签名，构建后校验 APK 签名和 16 KiB 对齐。
-资源采用 XZ preset 3 无损压缩。首次启动会显示解包进度，将资源流式恢复到应用私有目录并核对原文件的
+资源采用 XZ preset 3 无损压缩，由 release 模式 Rust 解码器流式解压，替代旧版的纯 Java 解码。
+首次启动会显示解包进度、速度与估计剩余时间，将资源流式恢复到应用私有目录并核对原文件的
 长度及 SHA-256，完成后进入游戏标题。后续启动复用已完成的资源，解包中断后可重新打开应用继续准备。
 
 安装 APK 后打开“情侣热恋中”，等待首次资源准备完成，再选择“开始游戏”。已有的 PC 剧情存档可从
@@ -24,7 +25,14 @@ APK 约 2.93 GiB，使用开发签名，构建后校验 APK 签名和 16 KiB 对
 001 自动存档槽保持原菜单的写保护，页码与行号保存到 `System.dat` 的 GlobalFlag85/86。
 备注输入使用手机键盘并按原 GBK 编码写入原存档的 comment 字段。
 
-原版画面/文本/声音/语音设置、鉴赏、自动阅读、已读快进与对话履历仍待实现。
+0.2.3 实现右侧原版按钮的自动阅读、已读/全部快进和对话履历。自动阅读按正文长度留出阅读时间，
+等待当前语音真正播放结束后再推进；快进跳过等待与转场，在未读页面（已读模式）、选择支和剧情结束时停止。
+点击普通画面可停止自动/快进，打开菜单、履历或进入后台也会停止。已读状态使用原版 `Already.dat`，
+进入标题不预读剧情。履历使用原版背景、按钮和语音图标，支持滑动、翻页、拖动滚动条和语音重听；
+保存当前会话最近500条，开始新游戏或读档后重置，不改变原版存档文件结构。
+完整游戏 APK 的图标从原版 `Loverable_cn.exe` 提取。
+
+原版画面/文本/声音/语音设置与鉴赏仍待实现。
 选项入口当前打开安卓导入导出工具，安卓返回键打开宿主暂停菜单。
 字体采用 Android 系统字体，窗口采用原版启动默认70%不透明度，菜单动画使用序列首帧，
 `selectM` 的特殊字号仍使用普通选择项字号。上述差异尚需继续对照 PC 实现。
@@ -37,7 +45,7 @@ OP 视频及特效边界见下方“当前演示边界”。
 
 ### 构建完整游戏 APK
 
-以下命令在项目根目录的 PowerShell 7 中执行。资源准备需要 Python 3，Android 构建需要 SDK Platform、
+以下命令在项目根目录的 PowerShell 7 中执行。资源准备需要 Python 3，EXE 图标提取需要 pefile 和 Pillow，Android 构建需要 SDK Platform、
 Build Tools、NDK、Java 工具链及 XZ for Java 1.12。构建脚本默认读取
 `target/android-libs/xz-1.12.jar`，也可通过 `-XzJar` 指定位置。依赖采用 0BSD 许可证。
 [XZ for Java](https://tukaani.org/xz/java.html)
@@ -53,6 +61,7 @@ python .\android\prepare-game.py $game .\target\bundled-loverable\assets
     -BuildTools .\target\android-sdk\android-15 `
     -Ndk .\target\android-sdk\android-ndk-r27c `
     -JavaHome 'E:\DevEco Studio\jbr' `
+    -IconExecutable (Join-Path $game 'Loverable_cn.exe') `
     -BundleDirectory .\target\bundled-loverable\assets
 ```
 
@@ -89,7 +98,7 @@ python .\android\prepare-game.py $game .\target\bundled-loverable\assets
 ## Android 与原版存档
 
 Android 宿主使用 Java 触摸界面、MediaPlayer 音频输出和 Rust JNI，最低版本为 Android 8.0。
-通用播放器构建包含 `arm64-v8a` 和 `x86_64` 两种 ABI，当前产物路径为 `bin/Yuka-Rs-0.2.2.apk`。
+通用播放器构建包含 `arm64-v8a` 和 `x86_64` 两种 ABI，当前产物路径为 `bin/Yuka-Rs-0.2.3.apk`。
 构建脚本为 `android/build.ps1`，需要传入 SDK Platform、Build Tools、NDK 和 Java 工具链目录。
 
 通用播放器安装后从“选项设置”中的安卓工具选择“导入游戏文件夹”，选中包含 `data*.ykc` 的游戏目录。
@@ -182,7 +191,7 @@ $game = 'D:\gal\love loabe\【PC】情侣热恋中\情侣热恋中（ラブラ�
 Windows 消息框为自绘布局，Android 界面采用上文所述原图布局。正文即时显示，字体效果统一。
 普通转场与蒙版转场使用交叉淡化，
 `Effect` 屏幕震动暂未实现。文字框移动、背景滚动和音频异步淡出已有实现。
-音频统一使用 65% 主音量，再乘脚本设置的局部音量。设备不可用时显示静音状态。
+剧情音频使用 65% 主音量，再乘脚本设置的局部音量。设备不可用时显示静音状态。
 
 `MoviePlay` 当前跳过 OP 视频并记录到报告。原版设置/鉴赏菜单和其他作品验证仍待实现。
 Windows JSON 存档中的变量状态随该存档恢复，Android 原格式存档将全局变量和已读记录单独持久化。
@@ -200,7 +209,7 @@ Windows JSON 存档中的变量状态随该存档恢复，Android 原格式存�
 | 原生逆向 | Windows API 依赖、命令注册表、关键分发器与处理函数地址 | 339 个注册项，脚本引用的 142 个函数名全部匹配 |
 
 100 页演示执行 1,264 步，加载 5 个脚本，解码 26 次图像资源和 56 次音频资源。
-发布版构建、50 项默认测试（44 项 library 测试和 6 项原格式 codec 测试）、6 项 Windows JSON 存档回归、
+发布版构建、56 项默认测试（50 项 library 测试和 6 项原格式 codec 测试）、6 项 Windows JSON 存档回归、
 4 项原格式 runtime 回归、1 项原档 codec 实数据回归、`cargo fmt --check` 和 Clippy 零警告检查通过。
 另有一项依赖本地全部游戏图像的测试，默认忽略，初始格式验证阶段已单独运行通过。
 音频计数表示建立解码器并确认首批样本，实际播放由音频线程继续解码。

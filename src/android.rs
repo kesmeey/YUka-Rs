@@ -11,7 +11,11 @@ use jni::{
     objects::{JClass, JIntArray, JString},
     sys::{jint, jintArray, jlong, jstring},
 };
-use std::{cell::RefCell, collections::BTreeMap, path::Path};
+use std::{
+    cell::RefCell,
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 struct Player {
     runtime: Runtime,
@@ -22,6 +26,7 @@ struct Player {
     pixels: Vec<u32>,
     previous: Vec<u32>,
     argb: Vec<i32>,
+    history_cache: PathBuf,
 }
 
 #[derive(Default)]
@@ -64,6 +69,48 @@ fn encode_pixels(env: &mut JNIEnv<'_>, image: Option<&image::RgbaImage>) -> Resu
     let array = env.new_int_array(i32::try_from(pixels.len())?)?;
     env.set_int_array_region(&array, 0, &pixels)?;
     Ok(array.into_raw())
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_yukars_player_NativeBridge_history(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) -> jstring {
+    let result = with_player(handle, |player| {
+        Ok(env
+            .new_string(serde_json::to_string(player.runtime.history())?)?
+            .into_raw())
+    });
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            throw(&mut env, error);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_yukars_player_NativeBridge_historyVoice(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    id: jlong,
+) -> jstring {
+    let result = with_player(handle, |player| {
+        let files = player
+            .runtime
+            .history_voice_files(u64::try_from(id)?, &player.history_cache)?;
+        Ok(env.new_string(serde_json::to_string(&files)?)?.into_raw())
+    });
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            throw(&mut env, error);
+            std::ptr::null_mut()
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -148,17 +195,20 @@ pub extern "system" fn Java_org_yukars_player_NativeBridge_create(
         let game: String = env.get_string(&game_dir)?.into();
         let saves: String = env.get_string(&save_dir)?.into();
         let cache: String = env.get_string(&audio_cache_dir)?.into();
+        let history_cache = Path::new(&cache).join("history");
         sound::configure_cache(cache.into())?;
         std::fs::create_dir_all(&saves)?;
-        let mut runtime = Runtime::new_native(
+        // The title must not execute or mark any story instructions as read.
+        let mut runtime = Runtime::new_unstarted(
             Path::new(&game),
             PLAY_SCRIPT,
             TextEncoding::Gbk,
             false,
             false,
             0,
-            saves.into(),
         )?;
+        runtime.configure_save_directory(saves.into());
+        runtime.load_native_globals()?;
         let title_scene = runtime.title_scene()?;
         runtime.set_paused(true);
         let player = Player {
@@ -170,6 +220,7 @@ pub extern "system" fn Java_org_yukars_player_NativeBridge_create(
             pixels: vec![0; WIDTH * HEIGHT],
             previous: vec![0; WIDTH * HEIGHT],
             argb: vec![0; WIDTH * HEIGHT],
+            history_cache,
         };
         Ok(SESSIONS.with(|sessions| {
             let mut sessions = sessions.borrow_mut();
@@ -208,7 +259,11 @@ pub extern "system" fn Java_org_yukars_player_NativeBridge_command(
                     player.hidden = false;
                     player.runtime.set_paused(false);
                 }
-                "advance" if !player.title => player.runtime.advance()?,
+                "advance" if !player.title => {
+                    player.runtime.set_playback_mode("manual")?;
+                    player.runtime.advance()?;
+                }
+                "playback" if !player.title => player.runtime.set_playback_mode(&argument)?,
                 "choose" if !player.title && !player.paused => {
                     player.runtime.choose(argument.parse()?)?
                 }
@@ -221,6 +276,7 @@ pub extern "system" fn Java_org_yukars_player_NativeBridge_command(
                 }
                 "hide" => player.hidden = argument == "1",
                 "title" => {
+                    player.runtime.set_playback_mode("manual")?;
                     player.runtime.flush_native_globals()?;
                     player.title = true;
                     player.paused = true;
@@ -261,7 +317,7 @@ pub extern "system" fn Java_org_yukars_player_NativeBridge_command(
                         .then(|| parts.next().unwrap_or("Android audio error").to_owned());
                     player.runtime.audio_completed(slot, generation, error);
                 }
-                "advance" | "choose" => {}
+                "advance" | "choose" | "playback" => {}
                 _ => return Err(format!("unknown Android command: {operation}").into()),
             }
             Ok(())
@@ -347,6 +403,12 @@ pub extern "system" fn Java_org_yukars_player_NativeBridge_state(
             "status": scene.status, "title": player.title, "paused": player.paused,
             "audio_warning": player.runtime.report().audio_warning, "audio": audio,
             "save_page": save_page, "save_row": save_row,
+            "playback": player.runtime.playback_mode().as_str(),
+            "waiting_key": player.runtime.waiting_key(),
+            "current_read": player.runtime.current_read(),
+            "voice_playing": player.runtime.voice_playing(),
+            "history_count": player.runtime.history().len(),
+            "history_revision": player.runtime.history_revision(),
         });
         Ok(env.new_string(json.to_string())?.into_raw())
     });

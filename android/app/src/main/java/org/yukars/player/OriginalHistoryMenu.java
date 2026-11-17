@@ -1,0 +1,124 @@
+// SPDX-License-Identifier: GPL-3.0-only
+package org.yukars.player;
+
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.RectF;
+import android.text.Layout;
+import android.text.StaticLayout;
+import android.text.TextPaint;
+import java.util.ArrayList;
+import java.util.List;
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+/** Original createHistory.yks artwork/coordinates with touch scrolling. */
+final class OriginalHistoryMenu {
+    interface Listener { void close(); void voice(long id); }
+    private static final int TOP = 70;
+    private static final int BOTTOM = 520;
+    private final OriginalAssets assets;
+    private final Listener listener;
+    private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+    private final List<Entry> entries = new ArrayList<>();
+    private float scroll;
+    private float totalHeight;
+    private boolean draggingBar;
+
+    private static final class Entry {
+        final long id;
+        final boolean voice;
+        final StaticLayout text;
+        final float y;
+        Entry(long id, boolean voice, StaticLayout text, float y) {
+            this.id = id; this.voice = voice; this.text = text; this.y = y;
+        }
+    }
+
+    OriginalHistoryMenu(OriginalAssets assets, JSONArray history, Listener listener) {
+        this.assets = assets;
+        this.listener = listener;
+        TextPaint textPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+        textPaint.setTextSize(25f);
+        textPaint.setColor(0xff163d55);
+        for (int index = 0; index < history.length(); index++) {
+            JSONObject entry = history.optJSONObject(index);
+            if (entry == null) continue;
+            String speaker = entry.optString("speaker");
+            String value = (speaker.isEmpty() ? "" : "【" + speaker + "】\n") + entry.optString("dialogue");
+            StaticLayout layout = StaticLayout.Builder.obtain(value, 0, value.length(), textPaint, 665)
+                .setAlignment(Layout.Alignment.ALIGN_NORMAL).setLineSpacing(5f, 1f).setIncludePad(false).build();
+            JSONArray voices = entry.optJSONArray("voices");
+            entries.add(new Entry(entry.optLong("id"), voices != null && voices.length() > 0, layout, totalHeight));
+            totalHeight += layout.getHeight() + 24;
+        }
+        scroll = maximumScroll();
+    }
+
+    int size() { return entries.size(); }
+    float maximumScroll() { return Math.max(0, totalHeight - (BOTTOM - TOP)); }
+    float scrollPosition() { return scroll; }
+    void move(float delta) { scroll = Math.max(0, Math.min(maximumScroll(), scroll + delta)); }
+
+    void draw(Canvas canvas, float pressedX, float pressedY) {
+        canvas.drawBitmap(assets.bitmap("his_base", -1), 0, 0, paint);
+        button(canvas, 0, 756, 15, pressedX, pressedY);
+        button(canvas, 1, 756, 59, pressedX, pressedY);
+        button(canvas, 2, 756, 545, pressedX, pressedY);
+        float fraction = maximumScroll() == 0 ? 1 : scroll / maximumScroll();
+        canvas.drawBitmap(assets.bitmap("his_gage", draggingBar ? 1 : 0), 766, 122 + fraction * 359, paint);
+        canvas.save();
+        canvas.clipRect(16, TOP, 745, BOTTOM);
+        if (entries.isEmpty()) {
+            TextPaint empty = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+            empty.setTextSize(25); empty.setColor(0xff163d55);
+            canvas.drawText("暂无对话履历", 70, 110, empty);
+        }
+        for (Entry entry : entries) {
+            float y = TOP + entry.y - scroll;
+            if (y > BOTTOM || y + entry.text.getHeight() < TOP) continue;
+            if (entry.voice) canvas.drawBitmap(assets.bitmap("sb_rireki_voice",
+                new RectF(16, y, 65, y + 40).contains(pressedX, pressedY) ? 1 : 0), 20, y, paint);
+            canvas.save(); canvas.translate(70, y); entry.text.draw(canvas); canvas.restore();
+        }
+        canvas.restore();
+        paint.setColor(0xff163d55);
+        paint.setTextSize(15f);
+        canvas.drawText("上下滑动查看履历 · 点击喇叭重听语音", 70, 554, paint);
+        paint.setColor(Color.WHITE);
+    }
+
+    private void button(Canvas canvas, int sequence, float x, float y, float px, float py) {
+        canvas.drawBitmap(assets.bitmap("his_btn", new RectF(x, y, x + 40, y + 41).contains(px, py)
+            ? sequence + 3 : sequence), x, y, paint);
+    }
+
+    boolean begin(float x, float y) {
+        draggingBar = x >= 756 && y >= 112 && y <= 532;
+        if (draggingBar) drag(x, y, 0);
+        return draggingBar;
+    }
+
+    void drag(float x, float y, float deltaY) {
+        if (draggingBar) scroll = maximumScroll() * Math.max(0, Math.min(1, (y - 142) / 359));
+        else move(-deltaY);
+    }
+
+    void end() { draggingBar = false; }
+
+    void tap(float x, float y) {
+        if (x >= 756) {
+            if (y >= 15 && y < 56) listener.close();
+            else if (y >= 59 && y < 100) move(-330);
+            else if (y >= 545 && y < 586) move(330);
+            return;
+        }
+        if (x >= 16 && x <= 65 && y >= TOP && y < BOTTOM) {
+            for (Entry entry : entries) {
+                float top = TOP + entry.y - scroll;
+                if (entry.voice && y >= top && y < top + 40) { listener.voice(entry.id); return; }
+            }
+        }
+    }
+}

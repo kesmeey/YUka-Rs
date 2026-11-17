@@ -4,14 +4,14 @@
 
 ## 完整游戏 APK
 
-`bin/Loverable-Yuka-Rs-0.2.2.apk` 的目标包名为 `org.yukars.loverable`。资源准备与构建命令见项目 README。
-APK 携带五个原 YKC 包的 XZ preset 3 无损压缩数据，首次启动自动流式解包并验证原文件长度与 SHA-256。
+`bin/Loverable-Yuka-Rs-0.2.3.apk` 的目标包名为 `org.yukars.loverable`。资源准备与构建命令见项目 README。
+APK 携带五个原 YKC 包的 XZ preset 3 无损压缩数据，首次启动使用 Rust 原生解码器自动流式解包并验证原文件长度与 SHA-256。
 完整资源目录为 `/data/user/0/org.yukars.loverable/files/game-bundled-loverable-cn`，其下的 `Save` 使用原版二进制格式。
 
 将 APK 复制到设备并安装后，打开“情侣热恋中”，等待资源准备完成并进入标题。ADB 安装和启动命令如下。
 
 ```powershell
-adb -s emulator-5580 install -r .\bin\Loverable-Yuka-Rs-0.2.2.apk
+adb -s emulator-5580 install -r .\bin\Loverable-Yuka-Rs-0.2.3.apk
 adb -s emulator-5580 shell am start -n org.yukars.loverable/org.yukars.player.MainActivity
 ```
 
@@ -20,7 +20,7 @@ adb -s emulator-5580 shell am start -n org.yukars.loverable/org.yukars.player.Ma
 
 ```powershell
 $bundleTest = @{
-    Apk = '.\bin\Loverable-Yuka-Rs-0.2.2.apk'
+    Apk = '.\bin\Loverable-Yuka-Rs-0.2.3.apk'
     SdkPlatform = '.\target\android-sdk\android-35'
     BuildTools = '.\target\android-sdk\android-15'
     JavaHome = 'E:\DevEco Studio\jbr'
@@ -41,11 +41,50 @@ $bundleTest = @{
 .\android\test.ps1 @bundleTest -Runner SmokeInstrumentation
 .\android\test.ps1 @bundleTest -Runner AudioFocusInstrumentation
 .\android\test.ps1 @bundleTest -Runner OriginalUiInstrumentation
+# PlaybackInstrumentation 的 OriginalSave 需指向真实的选择支存档，例如 savedata.006。
+.\android\test.ps1 @bundleTest -OriginalSave '/data/user/0/org.yukars.loverable/files/pc-input/savedata.006' -Runner PlaybackInstrumentation
+.\android\test.ps1 @bundleTest -Runner ActivityControlsInstrumentation
 ```
 
 `-TargetPackage` 用于生成测试 APK 的目标包配置，测试代码的类名仍位于 `org.yukars.player`。
 `-OriginalSave` 可传入设备上目标应用 UID 可读的 PC 原版剧情档路径，扩展验证读取、再保存和继续剧情。
 完整 APK 的安装、首次启动和资源一致性实测结果记录如下。
+
+### 阅读功能与解压优化 0.2.3
+
+完整 APK 为3,141,842,206字节，SHA-256为
+`0635C91035802B231965C57C9B75D0898E1807C0C4BB2F47952C4534CECB262B`。
+通用播放器 APK 为5,018,386字节，SHA-256为
+`2671F499369BB041C786931186931E312B2DF646E19E43000C7B45AB46870E62`。
+两者均包含ARM64和x86_64，通过v2/v3签名及16KiB对齐校验，versionCode为4。
+
+自动阅读等待正文阅读时间和实际语音完成回调，并保留300毫秒的语音后延迟。
+已读快进测试先浏览五页，再回到开头，确认自动停在第六页未读对话；`Already.dat` 在销毁并重建
+会话后保持已读状态。全部快进、手动取消、选择支拒绝自动选择和标题不预读首屏也有回归。
+履历验证正文与语音导出不改变当前画面/脚本/音频通道，原版图像、滑动、滚动条、翻页和喇叭命中位置可单独测试。
+历史语音重复导出使用各自独立的文件，过期请求的清理不会删掉新请求的语音。
+
+`BundledGameInstrumentation` 增加原生 XZ 的大输入/输出缓冲区、单字节输入、截断footer与错误校验回归。
+真实 `data03` 的前128 MiB在相同Android15 x86_64模拟器中，解码并计算SHA-256耗时：
+旧Java4156毫秒，新Rust1979毫秒，两者摘要一致（约2.10倍吞吐量）。该结果不代表真实手机的完整解压时间。
+主机完整1,710,660,649字节的同一资源纯解码耗时为Java44.58秒、Rust21.17秒。
+
+设备基准命令（需完整游戏APK中的随包资源）：
+
+```powershell
+adb -s emulator-5580 shell am instrument -w -e benchmark true org.yukars.player.tests/org.yukars.player.BundledGameInstrumentation
+```
+
+原版EXE包含一个32×32图标，由PE资源解析提取并经AAPT2编译，未执行EXE。
+完整包使用该图标，通用播放器使用仓库中的矢量图标。所有版本继续使用原版二进制剧情存档、全局和已读记录格式。
+
+最终签名完整APK已在Android15 x86_64模拟器安装，`PlaybackInstrumentation` 八项和
+`ActivityControlsInstrumentation` 四项全部通过。后者实际触摸原版自动按钮、普通画面取消、
+快进弹窗的全部模式、履历按钮与返回，检查真实后台/前台切换后恢复手动模式。
+`OriginalUiInstrumentation` 原档001通过195张图像、131个裁切、备注、缩略图和保存页回归；
+`SmokeInstrumentation` 真实选择档006通过PC原档往返和两个分支恢复。
+证据在 `evidence/android-playback-023/`。Rust默认56项、真实游戏阅读回归、原UI资源裁切、
+四项原格式存档回归、fmt和Clippy检查通过。ARM64已编译，真实手机的速度与扬声器输出待验证。
 
 ### 原版 UI 0.2.2 回归
 

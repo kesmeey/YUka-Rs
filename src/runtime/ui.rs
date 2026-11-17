@@ -63,7 +63,9 @@ impl Runtime {
             let frame = &frames[0];
             if frame.unknown != 0
                 || frame.action != 0
-                || !matches!((frame.flags, frame.duration), (1, 0) | (2 | 4, 1..))
+                // The original history voice icon combines flags 2 and 4 (6),
+                // both for its 50 ms animation and its zero-duration static state.
+                || !matches!((frame.flags, frame.duration), (1, 0) | (2 | 4, 1..) | (6, _))
             {
                 return Err("unsupported UI sprite frame flags, action, or duration".into());
             }
@@ -171,6 +173,23 @@ mod tests {
                 (502, 89)
             );
         }
+        let history_voice = "ykg\\system\\history\\sb_rireki_voice.ykg";
+        let voice_sheet = runtime.ui_image(history_voice, -1)?;
+        assert_eq!(voice_sheet.dimensions(), (210, 21));
+        for sequence in [0, 1] {
+            let voice = runtime.ui_image(history_voice, sequence)?;
+            assert_eq!(voice.dimensions(), (21, 21));
+            assert_eq!(
+                *voice,
+                image::imageops::crop_imm(&*voice_sheet, 0, 0, 21, 21).to_image()
+            );
+        }
+        for (name, sequences) in [("his_btn", 6), ("his_gage", 2)] {
+            for sequence in 0..sequences {
+                runtime.ui_image(&format!("ykg\\system\\history\\{name}.ykg"), sequence)?;
+            }
+        }
+        runtime.ui_image("ykg\\system\\history\\his_base.ykg", -1)?;
 
         let original_path = game.join("Save/savedata.001");
         let mut original = NativeSave::parse(&fs::read(&original_path)?)?;

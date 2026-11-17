@@ -32,6 +32,10 @@ final class OriginalAssets {
         assets.load(session, "ykg\\system\\window\\", "sys_btn02", 12);
         assets.load(session, "ykg\\system\\window\\", "sys_btn_help", 9);
         assets.load(session, "ykg\\system\\select\\", "select", 0);
+        assets.load(session, "ykg\\system\\history\\", "his_base", 0);
+        assets.load(session, "ykg\\system\\history\\", "his_btn", 6);
+        assets.load(session, "ykg\\system\\history\\", "his_gage", 2);
+        assets.load(session, "ykg\\system\\history\\", "sb_rireki_voice", 2);
         return assets;
     }
 
