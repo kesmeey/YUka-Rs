@@ -842,7 +842,11 @@ impl Runtime {
                         self.resources.read(string(args, 1)?)?,
                     )?;
                 }
-                self.sound.play(slot, function == "SoundPlayLoop")?;
+                if function == "SoundPlay" && args.len() >= 2 {
+                    self.sound.play_new(slot)?;
+                } else {
+                    self.sound.play(slot, function == "SoundPlayLoop")?;
+                }
                 // The supplied voiceSetting/createHistory scripts map voice groups to slots 10..21.
                 if (10..=21).contains(&slot)
                     && let Some((_, state)) = self

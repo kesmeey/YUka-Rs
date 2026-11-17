@@ -66,6 +66,7 @@ pub struct Sound {
     groups: BTreeMap<i32, (i32, i32, i32)>,
     auto_duck: bool,
     duck_active: bool,
+    voice_boundary: bool,
     pub warning: Option<String>,
     pub decoded_sounds: usize,
 }
@@ -82,6 +83,7 @@ impl Sound {
             groups: default_groups(),
             auto_duck: false,
             duck_active: false,
+            voice_boundary: false,
             warning: None,
             decoded_sounds: 0,
         }
@@ -223,6 +225,33 @@ impl Sound {
         Ok(())
     }
 
+    /// Native KeyWait sets engine+0x80138; the next voice SoundPlay consumes it.
+    pub fn mark_voice_boundary(&mut self) {
+        self.voice_boundary = true;
+    }
+
+    /// Two-argument, nonlooping SoundPlay; single-argument/loop plays do not
+    /// consume the native voice boundary bit (0x44209c versus 0x44221a).
+    pub fn play_new(&mut self, slot: i32) -> Result<()> {
+        if !self.states.contains_key(&slot) {
+            return Err(format!("sound slot {slot} is not loaded").into());
+        }
+        if (10..=21).contains(&slot) && self.voice_boundary {
+            self.voice_boundary = false;
+            let previous: Vec<_> = self
+                .states
+                .iter()
+                .filter_map(|(&id, state)| ((10..=21).contains(&id) && state.playing).then_some(id))
+                .collect();
+            // Queue stops before play, including old players still preparing in Java.
+            // Further voices before the next KeyWait belong to the same page/chorus.
+            for voice in previous {
+                self.stop(voice);
+            }
+        }
+        self.play(slot, false)
+    }
+
     pub fn set_streamed(&mut self, slot: i32, streamed: bool) {
         if let Some(state) = self.states.get_mut(&slot) {
             state.streamed = streamed;
@@ -362,6 +391,124 @@ impl Sound {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn voice_handoff_fixture() -> Sound {
+        let mut sound = Sound::new(false);
+        for (slot, playing) in [
+            (1, true),
+            (150, true),
+            (11, true),
+            (21, true),
+            (10, false),
+            (12, false),
+        ] {
+            sound.states.insert(
+                slot,
+                SoundState {
+                    path: format!("fixture-{slot}.ogg"),
+                    volume: 700,
+                    looping: slot == 1 || slot == 150,
+                    playing,
+                    streamed: slot == 1,
+                },
+            );
+            sound.generations.insert(slot, slot as u64 + 100);
+        }
+        sound
+    }
+
+    #[test]
+    fn first_new_page_voice_stops_previous_characters_before_play_but_preserves_bgm_se_and_chorus()
+    -> Result<()> {
+        let mut sound = voice_handoff_fixture();
+        sound.mark_voice_boundary();
+        sound.play_new(10)?;
+        let events = sound.drain_events();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| (event.op, event.slot, event.generation))
+                .collect::<Vec<_>>(),
+            [("stop", 11, 111), ("stop", 21, 121), ("play", 10, 110)]
+        );
+        assert!(!sound.is_playing(11));
+        assert!(!sound.is_playing(21));
+        assert!(sound.is_playing(10));
+        for slot in [1, 150] {
+            assert!(sound.is_playing(slot));
+            assert!(sound.states[&slot].looping);
+            assert_eq!(sound.states[&slot].volume, 700);
+        }
+        // Another voice before KeyWait is intentional same-page speech.
+        sound.play_new(12)?;
+        assert!(sound.is_playing(10) && sound.is_playing(12));
+        assert_eq!(
+            sound
+                .drain_events()
+                .iter()
+                .map(|event| (event.op, event.slot))
+                .collect::<Vec<_>>(),
+            [("play", 12)]
+        );
+        // A previous character's delayed completion cannot stop the new one.
+        sound.completed(11, 111);
+        assert!(sound.is_playing(10) && sound.is_playing(12));
+        // Native one-argument and loop forms do not consume the bit.
+        sound.mark_voice_boundary();
+        sound.play(11, false)?;
+        sound.play(12, true)?;
+        assert!(sound.voice_boundary);
+        assert_eq!(
+            sound
+                .drain_events()
+                .iter()
+                .map(|event| (event.op, event.slot))
+                .collect::<Vec<_>>(),
+            [("play", 11), ("play", 12)]
+        );
+        // The next ordinary two-argument voice retires the preceding chorus.
+        sound.play_new(21)?;
+        assert_eq!(
+            sound
+                .drain_events()
+                .iter()
+                .map(|event| (event.op, event.slot))
+                .collect::<Vec<_>>(),
+            [("stop", 10), ("stop", 11), ("stop", 12), ("play", 21)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn silent_pages_and_nonvoice_sounds_keep_old_voice_until_valid_new_voice() -> Result<()> {
+        let mut sound = voice_handoff_fixture();
+        // Repeated KeyWait boundaries may represent silent narration. The
+        // default click setting permits the old voice to keep playing there.
+        sound.mark_voice_boundary();
+        sound.mark_voice_boundary();
+        sound.play_new(1)?;
+        sound.play_new(150)?;
+        assert!(sound.is_playing(11) && sound.is_playing(21));
+        assert!(sound.voice_boundary);
+        assert!(sound.play_new(20).is_err());
+        assert!(sound.voice_boundary);
+        assert!(sound.is_playing(11) && sound.is_playing(21));
+        sound.drain_events();
+        // Muting a character does not permit its old pending player to overlap
+        // the next voice. Stops depend on requested playback, not audibility.
+        sound.group_volume(4, 0);
+        sound.drain_events();
+        sound.play_new(10)?;
+        assert_eq!(
+            sound
+                .drain_events()
+                .iter()
+                .map(|event| (event.op, event.slot))
+                .collect::<Vec<_>>(),
+            [("stop", 11), ("stop", 21), ("play", 10)]
+        );
+        Ok(())
+    }
 
     #[test]
     fn independent_group_gains_update_audio_without_overwriting_script_volume() {

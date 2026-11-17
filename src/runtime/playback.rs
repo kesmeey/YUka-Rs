@@ -244,6 +244,10 @@ impl Runtime {
     }
 
     pub(super) fn record_dialogue(&mut self) {
+        // KeyWait arms the native "replace previous page voice" bit. Keep the
+        // old voice through silent pages unless click-to-stop is enabled, then
+        // stop it when the first new voice starts (not every voice in a chorus).
+        self.sound.mark_voice_boundary();
         self.playback.page_started = Instant::now();
         self.playback.text_revealed = false;
         self.playback.record(
@@ -422,6 +426,63 @@ mod tests {
         assert_eq!(std::fs::read(&newer)?, b"OggSnewer");
         std::fs::remove_file(newer)?;
         Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires the original game through YUKA_TEST_GAME"]
+    fn new_story_voice_replaces_previous_character_across_real_dialogue_pages() -> Result<()> {
+        let game = PathBuf::from(std::env::var("YUKA_TEST_GAME")?);
+        let mut runtime = Runtime::new(
+            &game,
+            "yks/story/common/CHAPTER1-1.YKS",
+            TextEncoding::Gbk,
+            true,
+            true,
+            0,
+        )?;
+        assert_eq!(runtime.global_flag(16), 0);
+        let mut previous_character = None;
+        let mut character_changes = 0;
+        for _ in 0..160 {
+            assert!(runtime.waiting_key());
+            let current = runtime.history().back().unwrap();
+            if !current.voices.is_empty() {
+                let active: Vec<_> = runtime
+                    .sound
+                    .snapshot()
+                    .into_iter()
+                    .filter(|(slot, state)| (10..=21).contains(slot) && state.playing)
+                    .collect();
+                assert!(!active.is_empty());
+                for (_, voice) in &active {
+                    assert!(
+                        current.voices.contains(&voice.path),
+                        "voice from a preceding page remains active"
+                    );
+                }
+                let character = active[0].0;
+                if previous_character.is_some_and(|previous| previous != character) {
+                    character_changes += 1;
+                    assert!(
+                        runtime
+                            .sound
+                            .snapshot()
+                            .iter()
+                            .any(|(slot, state)| *slot == 1 && state.playing)
+                    );
+                }
+                previous_character = Some(character);
+                if character_changes >= 3 {
+                    println!(
+                        "Validated {} real dialogue pages and {character_changes} character handoffs with click-stop disabled",
+                        runtime.pages
+                    );
+                    return Ok(());
+                }
+            }
+            runtime.advance()?;
+        }
+        Err("did not reach three cross-character voice handoffs".into())
     }
 
     #[test]

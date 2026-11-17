@@ -2,6 +2,34 @@
 
 `tests/` 构建为独立的 `org.yukars.player.tests` instrumentation APK。测试在播放器应用 UID 下执行真实 JNI，会创建测试存档和音频缓存。
 
+## 换句语音修复与完整测试包 0.2.6
+
+0.2.6修复下一句由另一个角色发声时，上一句角色语音仍在播放的问题。
+修复依据为原版KeyWait设置的换句标记：新句第一条语音播放前停止旧句的角色语音，
+同一句内有意安排的多人合声继续保留。BGM和音效不受影响；“点击中断语音”仍按原设置生效。
+依据、边界及回归测试见 `docs/voice-playback.md`。
+
+完整测试包为 `bin/Loverable-Yuka-Rs-0.2.6.apk`，versionName为0.2.6、versionCode为7。
+包名、签名和原版存档结构延续旧版，资源清单为完整包模式，可供新设备首次安装。
+随包五份原始资源的XZ压缩数据、OP视频和运行时代码，不携带个人Save或解锁进度。
+安装与测试反馈说明位于 `bin/Loverable-Yuka-Rs-0.2.6-测试说明.txt`。
+本轮不向已连接手机安装或重启应用，0.2.6的实际设备覆盖安装和扬声器复测由测试者继续验证。
+
+`cargo test --lib --locked` 结果为59项通过、0失败、14项需本地资源的测试默认跳过。
+其中Android音频后端6项测试全部通过，新增回归验证旧语音stop先于新语音play、
+同页合声与BGM/音效保留，以及静默页和原版播放形式的边界。
+Java异步准备回调的requested、slot身份和generation保护经只读代码审查，未执行0.2.6设备instrumentation。
+真实 `CHAPTER1-1.YKS` 的专项回归另行显式执行，推进72页，三次跨角色语音交接通过，
+确认仅当前页语音处于播放状态且BGM保留。该测试静音运行，验证脚本和音频状态，不代表已试听设备输出。
+`cargo fmt --check` 和 `cargo clippy --all-targets --locked -- -D warnings` 通过。
+
+最终完整APK大小3,183,326,629字节（约3.18GB / 2.97GiB），SHA-256为
+`ACDAE381861E49CE2FC9F6C9B59A3ADA5FBF0D693A7C02E2F08A3BFA523F80F5`。
+v2/v3签名与16KiB ELF/APK对齐校验通过。两个ABI的包内引擎逐字节匹配本次0.2.6编译输出，
+包内完整资源清单与源清单相同，更新包限制标记未启用。
+包内五份XZ及OP视频的长度、流式SHA-256逐项匹配源清单；视频保持STORED便于直接播放。
+签名证书与旧包相同，打包成功后临时unsigned/aligned APK已删除，没有V4 idsig残留。
+
 ## 手机震屏报错修复 0.2.5
 
 连接的 Android 15 ARM64 手机在0.2.4执行
@@ -37,14 +65,14 @@ versionName为0.2.5、versionCode为6，保留双ABI、原EXE图标、开发签�
 
 ## 完整游戏 APK
 
-`bin/Loverable-Yuka-Rs-0.2.4.apk` 的目标包名为 `org.yukars.loverable`。资源准备与构建命令见项目 README。
+`bin/Loverable-Yuka-Rs-0.2.6.apk` 的目标包名为 `org.yukars.loverable`。资源准备与构建命令见项目 README。
 APK 携带五个原 YKC 包的 XZ preset 3 无损压缩数据，首次启动使用 Rust 原生解码器自动流式解包并验证原文件长度与 SHA-256。
 完整资源目录为 `/data/user/0/org.yukars.loverable/files/game-bundled-loverable-cn`，其下的 `Save` 使用原版二进制格式。
 
 将 APK 复制到设备并安装后，打开“情侣热恋中”，等待资源准备完成并进入标题。ADB 安装和启动命令如下。
 
 ```powershell
-adb -s emulator-5580 install -r .\bin\Loverable-Yuka-Rs-0.2.4.apk
+adb -s emulator-5580 install -r .\bin\Loverable-Yuka-Rs-0.2.6.apk
 adb -s emulator-5580 shell am start -n org.yukars.loverable/org.yukars.player.MainActivity
 ```
 
@@ -53,7 +81,7 @@ adb -s emulator-5580 shell am start -n org.yukars.loverable/org.yukars.player.Ma
 
 ```powershell
 $bundleTest = @{
-    Apk = '.\bin\Loverable-Yuka-Rs-0.2.4.apk'
+    Apk = '.\bin\Loverable-Yuka-Rs-0.2.6.apk'
     JavaHome = 'E:\DevEco Studio\jbr'
     XzJar = '.\target\android-libs\xz-1.12.jar'
     Adb = 'E:\platform-tools\adb.exe'

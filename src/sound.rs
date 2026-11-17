@@ -37,6 +37,7 @@ pub struct Sound {
     groups: BTreeMap<i32, (i32, i32, i32)>,
     auto_duck: bool,
     duck_active: bool,
+    voice_boundary: bool,
     pub warning: Option<String>,
     pub decoded_sounds: usize,
 }
@@ -65,6 +66,7 @@ impl Sound {
                 .collect(),
             auto_duck: false,
             duck_active: false,
+            voice_boundary: false,
             warning,
             decoded_sounds: 0,
         }
@@ -189,6 +191,31 @@ impl Sound {
         }
         self.update_duck();
         Ok(())
+    }
+
+    /// Native KeyWait sets engine+0x80138; the next voice SoundPlay consumes it.
+    pub fn mark_voice_boundary(&mut self) {
+        self.voice_boundary = true;
+    }
+
+    /// Two-argument, nonlooping SoundPlay; single-argument/loop plays do not
+    /// consume the native voice boundary bit (0x44209c versus 0x44221a).
+    pub fn play_new(&mut self, slot: i32) -> Result<()> {
+        if !self.data.contains_key(&slot) {
+            return Err(format!("sound slot {slot} is not loaded").into());
+        }
+        if (10..=21).contains(&slot) && self.voice_boundary {
+            self.voice_boundary = false;
+            let previous: Vec<_> = self
+                .states
+                .iter()
+                .filter_map(|(&id, state)| ((10..=21).contains(&id) && state.playing).then_some(id))
+                .collect();
+            for voice in previous {
+                self.stop(voice);
+            }
+        }
+        self.play(slot, false)
     }
 
     pub fn set_streamed(&mut self, slot: i32, streamed: bool) {
