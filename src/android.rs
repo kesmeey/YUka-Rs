@@ -2,14 +2,15 @@
 use crate::{
     Result,
     desktop::{HEIGHT, Scene, WIDTH, render_layers},
-    runtime::{PLAY_SCRIPT, Runtime},
+    resources::Resources,
+    runtime::{DOUSEI_ROUTES, PLAY_SCRIPT, Runtime},
     script::TextEncoding,
     sound,
 };
 use jni::{
     JNIEnv,
     objects::{JClass, JIntArray, JString},
-    sys::{jint, jintArray, jlong, jstring},
+    sys::{jboolean, jint, jintArray, jlong, jstring},
 };
 use std::{
     cell::RefCell,
@@ -20,6 +21,7 @@ use std::{
 struct Player {
     runtime: Runtime,
     title_scene: Scene,
+    dousei: bool,
     title: bool,
     paused: bool,
     hidden: bool,
@@ -300,22 +302,32 @@ pub extern "system" fn Java_org_yukars_player_NativeBridge_create(
         let history_cache = Path::new(&cache).join("history");
         sound::configure_cache(cache.into())?;
         std::fs::create_dir_all(&saves)?;
+        let directory = Path::new(&game);
+        let dousei = {
+            let resources = Resources::open(directory, TextEncoding::Gbk)?;
+            !resources.contains(PLAY_SCRIPT)
+                && DOUSEI_ROUTES.iter().all(|entry| resources.contains(entry))
+        };
+        let entry = if dousei {
+            DOUSEI_ROUTES[0]
+        } else {
+            PLAY_SCRIPT
+        };
         // The title must not execute or mark any story instructions as read.
-        let mut runtime = Runtime::new_unstarted(
-            Path::new(&game),
-            PLAY_SCRIPT,
-            TextEncoding::Gbk,
-            false,
-            false,
-            0,
-        )?;
+        let mut runtime =
+            Runtime::new_unstarted(directory, entry, TextEncoding::Gbk, false, false, 0)?;
         runtime.configure_save_directory(saves.into());
         runtime.load_native_globals()?;
-        let title_scene = runtime.title_scene()?;
+        let title_scene = if dousei {
+            Scene::default()
+        } else {
+            runtime.title_scene()?
+        };
         runtime.set_paused(true);
         let player = Player {
             runtime,
             title_scene,
+            dousei,
             title: true,
             paused: true,
             hidden: false,
@@ -342,6 +354,21 @@ pub extern "system" fn Java_org_yukars_player_NativeBridge_create(
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_org_yukars_player_NativeBridge_isDousei(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) -> jboolean {
+    match with_player(handle, |player| Ok(player.dousei)) {
+        Ok(dousei) => u8::from(dousei),
+        Err(error) => {
+            throw(&mut env, error);
+            0
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_org_yukars_player_NativeBridge_command(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
@@ -355,7 +382,16 @@ pub extern "system" fn Java_org_yukars_player_NativeBridge_command(
         with_player(handle, |player| {
             match operation.as_str() {
                 "new" => {
-                    player.runtime.restart()?;
+                    if player.dousei {
+                        let (route, variant) = argument
+                            .split_once(',')
+                            .ok_or("Dousei start requires route,variant")?;
+                        player
+                            .runtime
+                            .restart_dousei(route.parse()?, variant.parse()?)?;
+                    } else {
+                        player.runtime.restart()?;
+                    }
                     player.title = false;
                     player.paused = false;
                     player.hidden = false;

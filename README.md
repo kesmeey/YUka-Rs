@@ -6,6 +6,30 @@
 项目位置为 `E:\llvm-agent\yuka-rs`。本轮以用户提供的《情侣热恋中》汉化版作为真实样本。
 格式和 VM 位于 library crate，桌面宿主使用 minifb、fontdue、image 和 rodio。
 
+## 《同居情侣热恋中》FD 安卓版
+
+`bin/Dousei-Loverable-Yuka-Rs-0.2.7.apk` 是用户提供的汉化 FD 资源与 Yuka-Rs 运行时的完整安装包。
+FD 使用独立的 `org.yukars.dousei` 包名及存档目录，可以和《情侣热恋中》本篇同时安装。
+从安卓播放器菜单选择角色和 A/B/C 模式后，运行对应的原始剧情脚本。
+支持自动阅读、快进、履历、语音重听、手动与快速存读档，以及剧情的片头、片尾视频。
+FD 的标题、设置和存档菜单使用播放器自己的界面。FD 鉴赏库尚未接入。
+
+首次启动把四个原始 YKC 无损恢复到应用私有目录，约 4.1 GB，后续启动复用已准备的资源。
+建议手机预留至少 12 GB 可用空间。APK 支持 Android 8.0 及以上的 ARM64 和 x86_64 设备。
+
+以下命令使用本地原始资源构建，准备目录下的文件仅用于打包。
+
+```powershell
+$game = 'D:\gal\love loabe\【PC】同居情侣热恋中\【PC】同居情侣热恋中'
+$bundle = '.\target\bundled-dousei\assets'
+python .\android\prepare-game.py $game $bundle --profile dousei
+python .\android\prepare-video.py $game $bundle --movie d_loverable_OP.mpg --movie d_loverable_ED.mpg
+.\android\build.ps1 -BundleDirectory $bundle
+```
+
+四档与两部视频随包提供。原版程序、个人存档和全 CG 配置从本地资源目录分开保留。
+验收记录见 [Android 测试记录](android/TESTING.md)。
+
 ## 语音重叠修复 0.2.6
 
 换到下一句有语音的对白时，先停止上一句尚未播完的角色语音，再播放新句。

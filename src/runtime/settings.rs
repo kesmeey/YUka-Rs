@@ -130,6 +130,11 @@ impl Runtime {
             for &(id, value) in OPTION_DEFAULTS {
                 self.set_global_flag(id, value)?;
             }
+            if self.sound.is_voice_slot(25) {
+                for id in 122..=124 {
+                    self.set_global_flag(id, 1000)?;
+                }
+            }
             self.set_global_flag(60, 1)?;
         }
         self.apply_option_effects();
@@ -182,6 +187,17 @@ impl Runtime {
             for child in children {
                 expanded.insert(*child, value);
             }
+            if self.sound.is_voice_slot(25) {
+                let dousei_children: &[i32] = match id {
+                    102 => &[122, 123, 124],
+                    103 => &[122, 123],
+                    104 => &[124],
+                    _ => &[],
+                };
+                for child in dousei_children {
+                    expanded.insert(*child, value);
+                }
+            }
         }
         // Explicit per-character values in a bulk patch take precedence.
         expanded.extend(patch);
@@ -215,7 +231,7 @@ impl Runtime {
     pub(super) fn apply_option_effects(&mut self) {
         for (group, id) in [(0, 100), (1, 101), (2, 102)]
             .into_iter()
-            .chain((3..=14).map(|group| (group, group + 107)))
+            .chain((3..=17).map(|group| (group, group + 107)))
         {
             self.sound
                 .group_volume(group, self.global_flag(id).clamp(0, 1000));

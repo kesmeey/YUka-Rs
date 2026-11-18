@@ -75,10 +75,67 @@ impl Runtime {
     }
 
     pub fn restart(&mut self) -> Result<()> {
+        let entry = self.entry.clone();
+        self.restart_at(&entry, |_| Ok(()))
+    }
+
+    /// Launch a Dousei story from the native character/variant dispatcher.
+    pub fn restart_dousei(&mut self, route: usize, variant: usize) -> Result<()> {
+        let entry = DOUSEI_ROUTES.get(route).ok_or("invalid Dousei route")?;
+        let (number, letter) = [("0", "A"), ("1", "B"), ("2", "C")]
+            .get(variant)
+            .copied()
+            .ok_or("invalid Dousei variant")?;
+        self.restart_at(entry, |runtime| {
+            let vm = &mut runtime.stack.last_mut().unwrap().vm;
+            // Startup metadata and variables carried into the original root jump.
+            for (bank, id, value) in [
+                ("GlobalFlag", 500, 250),
+                ("GlobalFlag", 510, 500),
+                ("Flag", 10, 2),
+                ("Flag", 180, route as i32 + 1),
+                ("Flag", 181, variant as i32 + 1),
+                ("Flag", 290, 1),
+            ] {
+                vm.set_variable(
+                    Slot::IntegerVariable {
+                        bank: bank.into(),
+                        id,
+                    },
+                    Value::Integer(value),
+                )?;
+            }
+            for (bank, id, value) in [
+                ("GlobalString", 0, "同居情侣热恋中"),
+                ("String", 30, number),
+                ("String", 40, letter),
+                ("String", 50, "111"),
+                ("String", 51, "1"),
+                ("String", 52, "1"),
+                ("String", 53, "1"),
+                ("String", 56, "-1"),
+            ] {
+                vm.set_variable(
+                    Slot::StringVariable {
+                        bank: bank.into(),
+                        id,
+                    },
+                    text_value(value),
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    fn restart_at(
+        &mut self,
+        entry: &str,
+        prepare: impl FnOnce(&mut Self) -> Result<()>,
+    ) -> Result<()> {
         self.flush_native_globals()?;
         let mut replacement = Self::new_unstarted(
             &self.directory,
-            &self.entry,
+            entry,
             self.encoding,
             self.fast,
             self.muted,
@@ -87,6 +144,7 @@ impl Runtime {
         replacement.save_directory = self.save_directory.clone();
         replacement.load_native_globals()?;
         replacement.initialize_player_name()?;
+        prepare(&mut replacement)?;
         replacement.drive()?;
         *self = replacement;
         Ok(())
@@ -438,4 +496,159 @@ pub(super) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+#[cfg(test)]
+mod dousei_tests {
+    use super::*;
+
+    fn open() -> Result<Runtime> {
+        let directory = std::env::var_os("YUKA_TEST_DOUSEI").ok_or("set YUKA_TEST_DOUSEI")?;
+        Runtime::new_unstarted(
+            Path::new(&directory),
+            DOUSEI_ROUTES[0],
+            TextEncoding::Gbk,
+            true,
+            true,
+            0,
+        )
+    }
+
+    #[test]
+    #[ignore = "requires the user-supplied game through YUKA_TEST_DOUSEI"]
+    fn dousei_all_routes_and_variants_start() -> Result<()> {
+        let mut runtime = open()?;
+        for (route, entry) in DOUSEI_ROUTES.iter().enumerate() {
+            for variant in 0..3 {
+                runtime
+                    .restart_dousei(route, variant)
+                    .map_err(|error| format!("{entry} variant {variant}: {error}"))?;
+                for _ in 0..19 {
+                    if runtime.waiting_key() {
+                        runtime
+                            .advance()
+                            .map_err(|error| format!("{entry} variant {variant}: {error}"))?;
+                    } else if !runtime.choices().is_empty() {
+                        runtime.choose(0)?;
+                    } else {
+                        return Err(format!(
+                            "unexpected FD playback boundary: {}",
+                            runtime.report().script
+                        )
+                        .into());
+                    }
+                }
+                assert_eq!(runtime.entry, *entry);
+                assert!(!runtime.scene.finished);
+                println!(
+                    "FD route {} variant {}: {} pages",
+                    route + 1,
+                    variant + 1,
+                    runtime.pages
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires the user-supplied game through YUKA_TEST_DOUSEI"]
+    fn dousei_full_routes_return_to_title() -> Result<()> {
+        let mut runtime = open()?;
+        let requested = std::env::var("YUKA_TEST_DOUSEI_ROUTE")
+            .ok()
+            .map(|value| value.parse::<usize>())
+            .transpose()?;
+        if requested.is_some_and(|route| !(1..=DOUSEI_ROUTES.len()).contains(&route)) {
+            return Err("YUKA_TEST_DOUSEI_ROUTE must be 1 through 5".into());
+        }
+        for (route, entry) in DOUSEI_ROUTES.iter().enumerate() {
+            if requested.is_some_and(|requested| requested != route + 1) {
+                continue;
+            }
+            runtime.restart_dousei(route, 0)?;
+            while !runtime.scene.finished && runtime.pages < 10_000 {
+                let result = if !runtime.choices().is_empty() {
+                    runtime.choose(0)
+                } else if runtime.waiting_key() {
+                    runtime.advance()
+                } else {
+                    return Err(format!(
+                        "{entry}: unexpected FD playback boundary {}",
+                        runtime.report().script
+                    )
+                    .into());
+                };
+                result
+                    .map_err(|error| format!("{entry} after {} pages: {error}", runtime.pages))?;
+            }
+            assert_eq!(
+                runtime.end_reason.as_deref(),
+                Some("return_to_title"),
+                "{entry}"
+            );
+            println!(
+                "FD route {}: {} pages, {} instructions",
+                route + 1,
+                runtime.pages,
+                runtime.instructions
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    #[ignore = "requires the user-supplied game through YUKA_TEST_DOUSEI"]
+    fn dousei_native_save_reloads_and_continues() -> Result<()> {
+        let mut runtime = open()?;
+        let output = std::env::temp_dir().join(format!(
+            "yuka-dousei-save-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        fs::create_dir(&output)?;
+        let result = (|| -> Result<()> {
+            runtime.configure_save_directory(output.clone());
+            runtime.restart_dousei(1, 2)?;
+            for _ in 0..25 {
+                if runtime.waiting_key() {
+                    runtime.advance()?;
+                } else if !runtime.choices().is_empty() {
+                    runtime.choose(0)?;
+                } else {
+                    return Err("unexpected FD save test boundary".into());
+                }
+            }
+            let slot = output.join("savedata.003");
+            let before = (
+                runtime.report().script,
+                runtime.report().pc,
+                runtime.scene.dialogue.clone(),
+            );
+            runtime.save_native_with_comment(&slot, "FD round trip")?;
+            let parsed = crate::native_save::NativeSave::parse(&fs::read(&slot)?)?;
+            assert_eq!(parsed.flags[180], 2);
+            assert_eq!(parsed.flags[181], 3);
+            assert_eq!(parsed.strings[&30], b"2");
+            assert_eq!(parsed.strings[&40], b"C");
+            runtime.advance()?;
+            let after = (runtime.report().pc, runtime.scene.dialogue.clone());
+            runtime.restart_dousei(4, 0)?;
+            runtime.load_native(&slot)?;
+            assert_eq!(
+                (
+                    runtime.report().script,
+                    runtime.report().pc,
+                    runtime.scene.dialogue.clone()
+                ),
+                before
+            );
+            runtime.advance()?;
+            assert_eq!((runtime.report().pc, runtime.scene.dialogue.clone()), after);
+            Ok(())
+        })();
+        fs::remove_dir_all(&output)?;
+        result
+    }
 }

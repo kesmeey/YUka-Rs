@@ -5,6 +5,7 @@ final class NativeBridge {
     static { System.loadLibrary("yuka_rs"); }
     private NativeBridge() {}
     static native long create(String gameDirectory, String saveDirectory, String audioCacheDirectory);
+    static native boolean isDousei(long session);
     static native void command(long session, String operation, String argument);
     static native void tick(long session);
     static native void render(long session, int[] argbPixels);

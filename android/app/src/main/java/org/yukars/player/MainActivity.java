@@ -53,6 +53,7 @@ public final class MainActivity extends Activity {
     private static final int PICK_SAVE_DIRECTORY = 4;
     private static final int WIDTH = 800;
     private static final int HEIGHT = 600;
+    private static final String[] DOUSEI_ROUTES = {"花穗", "姬野继美", "琴宫千夏", "柳濑彩月", "三枝奈奈子"};
     private enum Mode { TITLE, PLAYING, PAUSED }
 
     private HandlerThread engineThread;
@@ -92,6 +93,7 @@ public final class MainActivity extends Activity {
     private volatile boolean actionPending;
     private volatile boolean engineFailed;
     private volatile boolean bundledMode;
+    private boolean douseiMode;
     private volatile Mode mode = Mode.TITLE;
     private volatile String message = "选择游戏目录，导入 data*.ykc 和 Save";
     private volatile File saveDirectory;
@@ -225,7 +227,8 @@ public final class MainActivity extends Activity {
             candidate = NativeBridge.create(directory.getAbsolutePath(), saves.getAbsolutePath(), cache.getAbsolutePath());
             if (candidate == 0) throw new IOException("引擎没有创建有效会话");
             NativeBridge.command(candidate, "title", "");
-            OriginalAssets originalAssets = OriginalAssets.load(candidate);
+            boolean dousei = NativeBridge.isDousei(candidate);
+            OriginalAssets originalAssets = dousei ? null : OriginalAssets.load(candidate);
             if (session != 0) NativeBridge.destroy(session);
             audio.close();
             session = candidate;
@@ -241,6 +244,7 @@ public final class MainActivity extends Activity {
                 clearExtras();
                 closeNameEntry();
                 settingsAssets = null;
+                douseiMode = dousei;
                 gameView.originalAssets = originalAssets;
                 movieHost.gameDirectory(directory);
                 gameView.hideText = false;
@@ -321,6 +325,12 @@ public final class MainActivity extends Activity {
 
     private void begin() {
         if (!nativeReady || busy || actionPending) return;
+        if (douseiMode) {
+            new AlertDialog.Builder(this).setTitle("选择角色")
+                .setItems(DOUSEI_ROUTES, (dialog, route) -> selectDouseiVariant(route))
+                .setNegativeButton("取消", null).show();
+            return;
+        }
         JSONObject names = gameView.stateObject("player_name");
         familyField.setText(names.optString("family", "爱泽"));
         givenField.setText(names.optString("given", "晴树"));
@@ -330,6 +340,13 @@ public final class MainActivity extends Activity {
         givenField.setVisibility(View.VISIBLE);
         gameView.requestFocus();
         gameView.invalidate();
+    }
+
+    private void selectDouseiVariant(int route) {
+        String[] variants = {"A", "B", "C"};
+        new AlertDialog.Builder(this).setTitle(DOUSEI_ROUTES[route] + " · 选择剧情模式")
+            .setItems(variants, (dialog, variant) -> command("new", route + "," + variant, this::resumePlayback))
+            .setNegativeButton("返回", (dialog, which) -> begin()).show();
     }
 
     private void confirmName() {
@@ -421,6 +438,10 @@ public final class MainActivity extends Activity {
 
     private void openSettings(int page) {
         if (!nativeReady || busy || actionPending) return;
+        if (douseiMode) {
+            openPlayerSettings();
+            return;
+        }
         flushSettings(null);
         Mode previous = settingsMenu != null ? settingsReturnMode : slotMenu != null ? slotReturnMode : mode;
         command("pause", "1", () -> {
@@ -451,6 +472,22 @@ public final class MainActivity extends Activity {
                     });
                 } catch (Exception error) { showError(error); }
             });
+        });
+    }
+
+    private void openPlayerSettings() {
+        Mode previous = mode;
+        command("pause", "1", () -> {
+            if (previous == Mode.PLAYING) mode = Mode.PAUSED;
+            PlayerSettingsDialog.show(this, gameView.settingFlags(), changes -> {
+                if (changes.has("-1")) {
+                    preferences.edit().putBoolean("fullscreen", changes.optInt("-1") != 0).apply();
+                    immersive();
+                    changes.remove("-1");
+                }
+                if (changes.length() > 0) command("settings", changes.toString(), null);
+            }, this::playerTools);
+            gameView.invalidate();
         });
     }
 
@@ -616,7 +653,7 @@ public final class MainActivity extends Activity {
     }
 
     private void openHistory() {
-        if (busy || actionPending || !nativeReady || gameView.originalAssets == null) return;
+        if (busy || actionPending || !nativeReady || (!douseiMode && gameView.originalAssets == null)) return;
         Mode previous = mode;
         command("pause", "1", () -> {
             historyReturnMode = previous;
@@ -704,7 +741,12 @@ public final class MainActivity extends Activity {
     }
 
     private void openSlotMenu(boolean saving) {
-        if (saveDirectory == null || gameView.originalAssets == null || busy || actionPending) return;
+        if (saveDirectory == null || busy || actionPending) return;
+        if (douseiMode) {
+            openPlayerSlotMenu(saving);
+            return;
+        }
+        if (gameView.originalAssets == null) return;
         if (saving && (!gameView.canSave() || engineFailed)) { toast("当前位置无法保存"); return; }
         Mode returnMode = slotMenu != null ? slotReturnMode : settingsMenu != null ? settingsReturnMode : mode;
         int page = slotMenu == null ? gameView.stateInteger("save_page", 0) : slotMenu.page;
@@ -722,6 +764,32 @@ public final class MainActivity extends Activity {
                 public void action(OriginalSaveMenu.Action action) { saveMenuAction(action); }
             });
             readSavePage(page);
+        });
+    }
+
+    private void openPlayerSlotMenu(boolean saving) {
+        if (saving && (!gameView.canSave() || engineFailed)) { toast("当前位置无法保存"); return; }
+        command("pause", "1", () -> {
+            if (mode == Mode.PLAYING) mode = Mode.PAUSED;
+            if (!saving) { savedFileMenu(); return; }
+            File directory = saveDirectory;
+            if (directory == null) return;
+            File[] slots = new File[20];
+            String[] labels = new String[slots.length];
+            for (int index = 0; index < slots.length; index++) {
+                File file = new File(directory, String.format(Locale.ROOT, "savedata.%03d", index + 2));
+                slots[index] = file;
+                labels[index] = file.getName() + (file.isFile() ? " · 已保存" : " · 空闲");
+            }
+            new AlertDialog.Builder(this).setTitle("保存到存档槽").setItems(labels, (dialog, index) -> {
+                File slot = slots[index];
+                if (slot.isFile()) {
+                    new AlertDialog.Builder(this).setTitle("覆盖存档")
+                        .setMessage(slot.getName())
+                        .setPositiveButton("覆盖", (confirm, which) -> save(slot))
+                        .setNegativeButton("取消", null).show();
+                } else save(slot);
+            }).setNegativeButton("取消", null).show();
         });
     }
 
@@ -848,7 +916,7 @@ public final class MainActivity extends Activity {
                 if (index == 0) savedFileMenu();
                 else if (index == 1) exportSaves();
                 else if (index == 2) pickSaveDirectory();
-                else if (index == 3) command("movie_play", "avi/lave_op.mpg", null);
+                else if (index == 3) command("movie_play", douseiMode ? "avi/d_loverable_OP.mpg" : "avi/lave_op.mpg", null);
                 else if (index == 4) command("title", "", () -> { clearSlotMenu(); clearSettings(); clearExtras(); mode = Mode.TITLE; });
                 else if (index == 5) pickGame();
                 else installedGames();
@@ -1238,14 +1306,18 @@ public final class MainActivity extends Activity {
                 JSONArray nameOffset = state.optJSONArray("speaker_offset");
                 float nx = nameOffset == null ? 0 : nameOffset.optInt(0);
                 float ny = nameOffset == null ? 0 : nameOffset.optInt(1);
-                originalImage(canvas, "window", -1, 3 + dx, 473 + dy, windowAlpha);
-                originalImage(canvas, "name", -1, nx, 437 + ny, windowAlpha);
+                if (douseiMode) {
+                    rect(canvas, 12, 467, 776, 133, (windowAlpha << 24) | 0x081523);
+                } else {
+                    originalImage(canvas, "window", -1, 3 + dx, 473 + dy, windowAlpha);
+                    originalImage(canvas, "name", -1, nx, 437 + ny, windowAlpha);
+                }
                 String dialogue = state.optString("dialogue");
                 int visible = Math.max(0, Math.min(dialogue.codePointCount(0, dialogue.length()), state.optInt("visible_chars", Integer.MAX_VALUE)));
                 dialogue = dialogue.substring(0, dialogue.offsetByCodePoints(0, visible));
                 if (!dialogue.isEmpty()) {
                     canvas.save();
-                    canvas.clipRect(98 + dx, 482 + dy, 712 + dx, 600 + dy);
+                    canvas.clipRect(98 + dx, 482 + dy, 712 + dx, (douseiMode ? 568 : 600) + dy);
                     storyText(canvas, dialogue, 98 + dx, 482 + dy, 614, Layout.Alignment.ALIGN_NORMAL, settings, flags);
                     canvas.restore();
                 }
@@ -1254,7 +1326,9 @@ public final class MainActivity extends Activity {
                     storyText(canvas, speaker, nx, 442 + ny, 220, Layout.Alignment.ALIGN_CENTER, settings, flags);
                 }
                 boolean canSave = state.optBoolean("can_save") && !engineFailed;
-                if (state.optBoolean("submenu_enabled", true)) {
+                if (douseiMode && state.optBoolean("submenu_enabled", true)) {
+                    drawPlayerControls(canvas, canSave);
+                } else if (state.optBoolean("submenu_enabled", true)) {
                 originalButton(canvas, "sys_btn01", 0, 5, "SYSTEM", 388, 580, 72, 16,
                     nativeReady, () -> openSettings(preferences.getInt("settings_page", 0)));
                 originalButton(canvas, "sys_btn01", 1, 6, "Q.SAVE", 462, 580, 72, 16,
@@ -1308,8 +1382,33 @@ public final class MainActivity extends Activity {
             }
         }
 
+        private void drawPlayerControls(Canvas canvas, boolean canSave) {
+            String playback = state.optString("playback", "manual");
+            add(canvas, "设置", 12, 568, 81, 30, nativeReady, MainActivity.this::openPlayerSettings);
+            add(canvas, "快存", 99, 568, 81, 30, canSave, MainActivity.this::quickSave);
+            add(canvas, "快读", 186, 568, 81, 30, nativeReady, MainActivity.this::quickLoad);
+            add(canvas, "存档", 273, 568, 81, 30, canSave, MainActivity.this::saveMenu);
+            add(canvas, "读档", 360, 568, 81, 30, nativeReady, MainActivity.this::loadMenu);
+            add(canvas, "隐藏", 447, 568, 81, 30, true,
+                () -> command("playback", "manual", () -> { hideText = true; invalidate(); }));
+            add(canvas, playback.equals("auto") ? "停止" : "自动", 534, 568, 81, 30, true, MainActivity.this::toggleAuto);
+            add(canvas, playback.startsWith("skip") ? "停止" : "快进", 621, 568, 81, 30, true, MainActivity.this::toggleSkip);
+            add(canvas, "履历", 708, 568, 81, 30, true, MainActivity.this::openHistory);
+        }
+
         private void drawMenu(Canvas canvas) {
             boolean canSave = state.optBoolean("can_save") && !busy && !engineFailed;
+            if (mode == Mode.TITLE && douseiMode) {
+                rect(canvas, 0, 0, WIDTH, HEIGHT, 0xff101c2c);
+                text(canvas, "同居情侣热恋中", 210, 176, 40, Color.WHITE);
+                add(canvas, "开始游戏", 210, 232, 380, 48, nativeReady, MainActivity.this::begin);
+                add(canvas, "读取存档", 210, 292, 380, 48, nativeReady, MainActivity.this::loadMenu);
+                add(canvas, "播放 OP 视频", 210, 352, 380, 48, nativeReady,
+                    () -> command("movie_play", "avi/d_loverable_OP.mpg", null));
+                add(canvas, "播放设置", 210, 412, 380, 48, nativeReady, MainActivity.this::openPlayerSettings);
+                add(canvas, "退出", 210, 472, 380, 48, true, MainActivity.this::finish);
+                return;
+            }
             if (mode == Mode.TITLE) {
                 if (bundledMode && !nativeReady)
                     add(canvas, "重试准备游戏", 210, 272, 380, 42, true, MainActivity.this::retryBundledGame);
@@ -1343,6 +1442,7 @@ public final class MainActivity extends Activity {
                 add(canvas, "返回标题", 210, 390, 380, 42, nativeReady,
                     () -> command("title", "", () -> mode = Mode.TITLE));
                 add(canvas, "导出完整存档目录", 210, 438, 380, 42, nativeReady, MainActivity.this::exportSaves);
+                if (douseiMode) add(canvas, "播放设置", 210, 486, 380, 42, nativeReady, MainActivity.this::openPlayerSettings);
             }
         }
 
@@ -1473,7 +1573,9 @@ public final class MainActivity extends Activity {
                 if ((event.getButtonState() & MotionEvent.BUTTON_SECONDARY) != 0) { navigateBack(); return true; }
                 touchStartX = x; touchStartY = y; pressedX = x; pressedY = y;
                 longPressed = false;
-                if (mode == Mode.PLAYING && x >= 761 && y >= 543 && y < 564)
+                boolean skipButton = douseiMode ? x >= 621 && x < 702 && y >= 568 && y < 598
+                    : x >= 761 && y >= 543 && y < 564;
+                if (mode == Mode.PLAYING && skipButton && !hideText)
                     ui.postDelayed(skipLongPress, 550);
                 touchLastY = y; historyDragged = false;
                 if (historyMenu != null && historyMenu.begin(x, y)) historyDragged = true;

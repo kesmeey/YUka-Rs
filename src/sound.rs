@@ -114,7 +114,7 @@ impl Sound {
     }
 
     fn update_duck(&mut self) {
-        let active = self.auto_duck && (10..=21).any(|slot| self.is_audible(slot));
+        let active = self.auto_duck && self.voice_playing();
         if active != self.duck_active {
             self.duck_active = active;
             for (&slot, sink) in &self.sinks {
@@ -163,6 +163,32 @@ impl Sound {
             && self.states.get(&slot).is_some_and(|state| state.volume > 0)
     }
 
+    pub fn is_voice_slot(&self, slot: i32) -> bool {
+        (10..=21).contains(&slot)
+            || (15..=17).any(|group| {
+                self.groups
+                    .get(&group)
+                    .is_some_and(|&(start, end, _)| (start..=end).contains(&slot))
+            })
+    }
+
+    pub fn voice_playing(&self) -> bool {
+        self.states
+            .keys()
+            .any(|&slot| self.is_voice_slot(slot) && self.is_audible(slot))
+    }
+
+    pub fn stop_voices(&mut self) {
+        let previous: Vec<_> = self
+            .states
+            .iter()
+            .filter_map(|(&id, state)| (self.is_voice_slot(id) && state.playing).then_some(id))
+            .collect();
+        for voice in previous {
+            self.stop(voice);
+        }
+    }
+
     pub fn play(&mut self, slot: i32, looping: bool) -> Result<()> {
         let data = self
             .data
@@ -204,16 +230,9 @@ impl Sound {
         if !self.data.contains_key(&slot) {
             return Err(format!("sound slot {slot} is not loaded").into());
         }
-        if (10..=21).contains(&slot) && self.voice_boundary {
+        if self.is_voice_slot(slot) && self.voice_boundary {
             self.voice_boundary = false;
-            let previous: Vec<_> = self
-                .states
-                .iter()
-                .filter_map(|(&id, state)| ((10..=21).contains(&id) && state.playing).then_some(id))
-                .collect();
-            for voice in previous {
-                self.stop(voice);
-            }
+            self.stop_voices();
         }
         self.play(slot, false)
     }

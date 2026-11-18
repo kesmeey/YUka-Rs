@@ -137,6 +137,33 @@ impl Archive {
         Ok(index)
     }
 
+    /// Compare colliding member payloads without allocating either whole file.
+    pub(crate) fn same_payload(&mut self, left: usize, right: usize) -> Result<bool> {
+        let left = &self.entries[left];
+        let right = &self.entries[right];
+        if left.size != right.size {
+            return Ok(false);
+        }
+        if left.offset == right.offset {
+            return Ok(true);
+        }
+        let mut a = [0u8; 32 * 1024];
+        let mut b = [0u8; 32 * 1024];
+        let mut position = 0;
+        while position < left.size {
+            let count = (left.size - position).min(a.len() as u64) as usize;
+            self.file.seek(SeekFrom::Start(left.offset + position))?;
+            self.file.read_exact(&mut a[..count])?;
+            self.file.seek(SeekFrom::Start(right.offset + position))?;
+            self.file.read_exact(&mut b[..count])?;
+            if a[..count] != b[..count] {
+                return Ok(false);
+            }
+            position += count as u64;
+        }
+        Ok(true)
+    }
+
     /// Reads one member. The caller supplies an allocation limit appropriate to its decoder.
     pub fn read_entry(&mut self, index: usize, max_bytes: u64) -> Result<Vec<u8>> {
         let entry = self

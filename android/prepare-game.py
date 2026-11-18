@@ -1,4 +1,4 @@
-"""Losslessly prepare the supplied Loverable archives for a self-contained APK."""
+"""Losslessly prepare supplied Yuka archives for a self-contained APK."""
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,6 +12,10 @@ import re
 
 CHUNK_SIZE = 1024 * 1024
 PRESET = 3
+PROFILES = {
+    "loverable": ("loverable-cn", "情侣热恋中"),
+    "dousei": ("dousei-cn", "同居情侣热恋中"),
+}
 
 
 def sha256_file(path):
@@ -87,7 +91,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("game", type=Path, help="Original directory containing data*.ykc")
     parser.add_argument("output", type=Path, help="Build-only assets directory outside the original game")
+    parser.add_argument("--profile", choices=PROFILES, default="loverable")
     arguments = parser.parse_args()
+    bundle_id, bundle_name = PROFILES[arguments.profile]
     game = arguments.game.resolve(strict=True)
     output = arguments.output.resolve()
     if output == game or game in output.parents:
@@ -105,7 +111,7 @@ def main():
     previous = {}
     if manifest_path.is_file():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if manifest.get("id") == "loverable-cn" and manifest.get("preset") == PRESET:
+        if manifest.get("id") == bundle_id and manifest.get("preset") == PRESET:
             previous = {item["name"]: item for item in manifest.get("files", [])}
     files = []
     with ThreadPoolExecutor(max_workers=min(4, len(archives))) as executor:
@@ -115,7 +121,7 @@ def main():
     files.sort(key=lambda item: item["name"])
     if sum(item["encodedSize"] for item in files) > (1 << 32) - 32 * 1024 * 1024:
         raise ValueError("Compressed archives exceed the ZIP32 APK size budget")
-    manifest = {"name": "情侣热恋中", "id": "loverable-cn", "preset": PRESET, "files": files}
+    manifest = {"name": bundle_name, "id": bundle_id, "preset": PRESET, "files": files}
     temporary = manifest_path.with_suffix(".json.part")
     with temporary.open("w", encoding="utf-8", newline="\n") as target:
         json.dump(manifest, target, ensure_ascii=False, indent=2)

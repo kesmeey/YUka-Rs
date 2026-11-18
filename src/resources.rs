@@ -89,18 +89,29 @@ impl Resources {
         let mut archives = Vec::new();
         let mut members = BTreeMap::new();
         for path in paths {
-            let archive = Archive::open(path)?;
-            let mut local_names = std::collections::BTreeSet::new();
-            for (index, entry) in archive.entries.iter().enumerate() {
+            let mut archive = Archive::open(path)?;
+            let mut local_names = BTreeMap::new();
+            for index in 0..archive.entries.len() {
+                let entry = &archive.entries[index];
                 if entry.name_had_errors {
                     return Err(
                         format!("undecodable resource name in {}", archive.path.display()).into(),
                     );
                 }
                 let name = key(&entry.name);
-                if !local_names.insert(name.clone()) {
-                    return Err(format!("ambiguous resource name {}", entry.name).into());
+                if let Some(&previous) = local_names.get(&name) {
+                    // Some shipped archives contain the same image under two
+                    // case variants. Collapse only byte-identical members.
+                    if !archive.same_payload(previous, index)? {
+                        return Err(format!(
+                            "ambiguous resource name {}",
+                            archive.entries[index].name
+                        )
+                        .into());
+                    }
+                    continue;
                 }
+                local_names.insert(name.clone(), index);
                 // Higher-numbered data archives override earlier archives.
                 members.insert(name, (archives.len(), index));
             }
@@ -116,6 +127,10 @@ impl Resources {
             loaded_images: 0,
             loaded_scripts: 0,
         })
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.members.contains_key(&key(name))
     }
 
     pub fn read(&mut self, name: &str) -> Result<Vec<u8>> {

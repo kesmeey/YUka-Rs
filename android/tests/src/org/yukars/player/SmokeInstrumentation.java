@@ -60,15 +60,19 @@ public final class SmokeInstrumentation extends Instrumentation {
             output = new File(saves, "android-smoke-result.json");
             session = NativeBridge.create(game, saves, audio);
             require(session != 0, "native create returned a null session");
+            boolean dousei = NativeBridge.isDousei(session);
+            String newGame = dousei ? "0,0" : "";
+            summary.put("dousei", dousei);
 
             stage = "title";
             NativeBridge.command(session, "title", "");
             JSONObject title = state();
             require(title.optBoolean("title"), "title command did not enter title state");
-            renderVisible();
+            // The Android player draws the Dousei title controls over an empty scene.
+            if (!dousei) renderVisible();
 
             stage = "new_game";
-            NativeBridge.command(session, "new", "");
+            NativeBridge.command(session, "new", newGame);
             NativeBridge.command(session, "pause", "0");
             JSONObject current = waitStable();
             require(!current.optString("dialogue").isEmpty(), "new game has no first dialogue");
@@ -115,7 +119,7 @@ public final class SmokeInstrumentation extends Instrumentation {
                 stage = "original_pc_resave";
                 NativeBridge.command(session, "save", reexported.getAbsolutePath());
                 require(reexported.isFile() && reexported.length() > 64, "resaved PC data missing");
-                NativeBridge.command(session, "new", "");
+                NativeBridge.command(session, "new", newGame);
                 stage = "original_pc_round_trip";
                 NativeBridge.command(session, "load", reexported.getAbsolutePath());
                 JSONObject restored = waitStable(true);

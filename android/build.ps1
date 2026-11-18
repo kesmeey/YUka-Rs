@@ -28,7 +28,29 @@ $XzJar = $tools.XzJar
 $cargoTarget = Get-YukaCargoTargetDirectory $project $CargoTargetDirectory
 $bundled = -not [string]::IsNullOrWhiteSpace($BundleDirectory)
 if ($ThinUpdate -and -not $bundled) { throw '-ThinUpdate requires -BundleDirectory' }
-$outputName = if ($bundled) { 'package-loverable' } else { 'package-player' }
+$apkPrefix = 'Yuka-Rs'
+$outputName = 'package-player'
+if ($bundled) {
+    $BundleDirectory = (Resolve-Path -LiteralPath $BundleDirectory).Path
+    $bundleJson = Join-Path $BundleDirectory 'bundled-game.json'
+    $bundle = Get-Content -LiteralPath $bundleJson -Raw -Encoding UTF8 | ConvertFrom-Json
+    switch -CaseSensitive ($bundle.id) {
+        'loverable-cn' {
+            $applicationId = 'org.yukars.loverable'
+            $apkPrefix = 'Loverable-Yuka-Rs'
+            $outputName = 'package-loverable'
+        }
+        'dousei-cn' {
+            $applicationId = 'org.yukars.dousei'
+            $apkPrefix = 'Dousei-Loverable-Yuka-Rs'
+            $outputName = 'package-dousei'
+        }
+        default { throw 'Unsupported game bundle profile' }
+    }
+    if (@($bundle.files).Count -eq 0 -or [string]::IsNullOrWhiteSpace($bundle.name)) {
+        throw 'Invalid game bundle manifest'
+    }
+}
 $output = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { Join-Path (Get-YukaAndroidWorkRoot $project) $outputName } else { [IO.Path]::GetFullPath($OutputDirectory, $project) }
 if ($CheckTools) {
     $tools | Add-Member -NotePropertyName OutputDirectory -NotePropertyValue $output
@@ -70,10 +92,6 @@ foreach ($notice in (Get-ChildItem -LiteralPath "$PSScriptRoot/licenses" -File))
     $bundleFiles += [PSCustomObject]@{Source=$notice.FullName; Entry=('assets/licenses/' + $notice.Name); Compression=[IO.Compression.CompressionLevel]::Optimal}
 }
 if ($bundled) {
-    $BundleDirectory = (Resolve-Path -LiteralPath $BundleDirectory).Path
-    $bundleJson = Join-Path $BundleDirectory 'bundled-game.json'
-    $bundle = Get-Content -LiteralPath $bundleJson -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($bundle.id -ne 'loverable-cn' -or @($bundle.files).Count -eq 0) { throw 'Invalid Loverable bundle manifest' }
     if ($ThinUpdate) {
         # Only this generated copy changes; the full bundle remains reusable.
         $bundle | Add-Member -NotePropertyName requiresPreparedResources -NotePropertyValue $true -Force
@@ -114,7 +132,7 @@ if ($bundled) {
     if (-not $ThinUpdate) { $payloadBytes += ($bundle.files | Measure-Object -Property encodedSize -Sum).Sum }
     if ($payloadBytes -gt 0xffffffffL - 32MB) { throw 'Compressed game exceeds the ZIP32 APK size budget' }
     [xml]$manifestXml = Get-Content -LiteralPath $manifest -Raw -Encoding UTF8
-    $manifestXml.manifest.SetAttribute('package', 'org.yukars.loverable')
+    $manifestXml.manifest.SetAttribute('package', $applicationId)
     $manifestXml.manifest.application.SetAttribute('label', 'http://schemas.android.com/apk/res/android', [string]$bundle.name) | Out-Null
     $manifest = Join-Path $output 'AndroidManifest.xml'
     $manifestXml.Save($manifest)
@@ -186,8 +204,8 @@ try {
         Invoke-Checked "$JavaHome/bin/keytool.exe" @('-genkeypair', '-keystore', $keystore, '-storepass', 'android', '-keypass', 'android', '-alias', 'yuka-rs', '-keyalg', 'RSA', '-keysize', '2048', '-validity', '10000', '-dname', 'CN=Yuka-Rs Development', '-noprompt')
     }
     Invoke-Checked "$BuildTools/zipalign.exe" @('-f', '-P', '16', '4', "$output/unsigned.apk", "$output/aligned.apk")
-    $apkName = if ($ThinUpdate) { "Loverable-Yuka-Rs-$versionName-update.apk" }
-        elseif ($bundled) { "Loverable-Yuka-Rs-$versionName.apk" } else { "Yuka-Rs-$versionName.apk" }
+    $apkName = if ($ThinUpdate) { "$apkPrefix-$versionName-update.apk" }
+        else { "$apkPrefix-$versionName.apk" }
     $apk = Join-Path $delivery $apkName
     Invoke-Checked "$BuildTools/apksigner.bat" @('sign', '--v4-signing-enabled', 'false', '--ks', $keystore, '--ks-key-alias', 'yuka-rs', '--ks-pass', 'pass:android', '--key-pass', 'pass:android', '--out', $apk, "$output/aligned.apk")
     Invoke-Checked "$BuildTools/apksigner.bat" @('verify', '--verbose', $apk)

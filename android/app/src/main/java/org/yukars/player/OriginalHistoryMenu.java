@@ -13,7 +13,7 @@ import java.util.List;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-/** Original createHistory.yks artwork/coordinates with touch scrolling. */
+/** Scrollable dialogue history, with optional resource artwork. */
 final class OriginalHistoryMenu {
     interface Listener { void close(); void voice(long id); }
     private static final int TOP = 70;
@@ -41,7 +41,7 @@ final class OriginalHistoryMenu {
         this.listener = listener;
         TextPaint textPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
         textPaint.setTextSize(25f);
-        textPaint.setColor(0xff163d55);
+        textPaint.setColor(assets != null ? 0xff163d55 : Color.WHITE);
         for (int index = 0; index < history.length(); index++) {
             JSONObject entry = history.optJSONObject(index);
             if (entry == null) continue;
@@ -62,36 +62,60 @@ final class OriginalHistoryMenu {
     void move(float delta) { scroll = Math.max(0, Math.min(maximumScroll(), scroll + delta)); }
 
     void draw(Canvas canvas, float pressedX, float pressedY) {
-        canvas.drawBitmap(assets.bitmap("his_base", -1), 0, 0, paint);
+        if (assets == null) {
+            paint.setColor(0xff101c2c);
+            canvas.drawRect(0, 0, 800, 600, paint);
+            paint.setColor(Color.WHITE);
+            paint.setTextSize(28);
+            canvas.drawText("对话履历", 70, 46, paint);
+        } else canvas.drawBitmap(assets.bitmap("his_base", -1), 0, 0, paint);
         button(canvas, 0, 756, 15, pressedX, pressedY);
         button(canvas, 1, 756, 59, pressedX, pressedY);
         button(canvas, 2, 756, 545, pressedX, pressedY);
         float fraction = maximumScroll() == 0 ? 1 : scroll / maximumScroll();
-        canvas.drawBitmap(assets.bitmap("his_gage", draggingBar ? 1 : 0), 766, 122 + fraction * 359, paint);
+        if (assets == null) {
+            paint.setColor(0xff476781);
+            canvas.drawRect(776, 122, 781, 520, paint);
+            paint.setColor(0xffd4e4ef);
+            canvas.drawRoundRect(770, 122 + fraction * 359, 787, 157 + fraction * 359, 7, 7, paint);
+            paint.setColor(Color.WHITE);
+        } else canvas.drawBitmap(assets.bitmap("his_gage", draggingBar ? 1 : 0), 766, 122 + fraction * 359, paint);
         canvas.save();
         canvas.clipRect(16, TOP, 745, BOTTOM);
         if (entries.isEmpty()) {
             TextPaint empty = new TextPaint(Paint.ANTI_ALIAS_FLAG);
-            empty.setTextSize(25); empty.setColor(0xff163d55);
+            empty.setTextSize(25); empty.setColor(assets != null ? 0xff163d55 : Color.WHITE);
             canvas.drawText("暂无对话履历", 70, 110, empty);
         }
         for (Entry entry : entries) {
             float y = TOP + entry.y - scroll;
             if (y > BOTTOM || y + entry.text.getHeight() < TOP) continue;
-            if (entry.voice) canvas.drawBitmap(assets.bitmap("sb_rireki_voice",
-                new RectF(16, y, 65, y + 40).contains(pressedX, pressedY) ? 1 : 0), 20, y, paint);
+            if (entry.voice) {
+                boolean pressed = new RectF(16, y, 65, y + 40).contains(pressedX, pressedY);
+                if (assets != null) canvas.drawBitmap(assets.bitmap("sb_rireki_voice", pressed ? 1 : 0), 20, y, paint);
+                else plainButton(canvas, "▶", 20, y, pressed);
+            }
             canvas.save(); canvas.translate(70, y); entry.text.draw(canvas); canvas.restore();
         }
         canvas.restore();
-        paint.setColor(0xff163d55);
+        paint.setColor(assets != null ? 0xff163d55 : Color.WHITE);
         paint.setTextSize(15f);
         canvas.drawText("上下滑动查看履历 · 点击喇叭重听语音", 70, 554, paint);
         paint.setColor(Color.WHITE);
     }
 
     private void button(Canvas canvas, int sequence, float x, float y, float px, float py) {
-        canvas.drawBitmap(assets.bitmap("his_btn", new RectF(x, y, x + 40, y + 41).contains(px, py)
-            ? sequence + 3 : sequence), x, y, paint);
+        boolean pressed = new RectF(x, y, x + 40, y + 41).contains(px, py);
+        if (assets == null) plainButton(canvas, new String[]{"×", "↑", "↓"}[sequence], x, y, pressed);
+        else canvas.drawBitmap(assets.bitmap("his_btn", pressed ? sequence + 3 : sequence), x, y, paint);
+    }
+
+    private void plainButton(Canvas canvas, String label, float x, float y, boolean pressed) {
+        paint.setColor(pressed ? 0xff587995 : 0xff2c4860);
+        canvas.drawRoundRect(x, y, x + 40, y + 40, 8, 8, paint);
+        paint.setColor(Color.WHITE);
+        paint.setTextSize(22);
+        canvas.drawText(label, x + (40 - paint.measureText(label)) / 2, y + 28, paint);
     }
 
     boolean begin(float x, float y) {

@@ -188,7 +188,7 @@ impl Runtime {
     }
 
     pub fn voice_playing(&self) -> bool {
-        (10..=21).any(|slot| self.sound.is_audible(slot))
+        self.sound.voice_playing()
     }
 
     pub fn visible_chars(&self) -> usize {
@@ -215,9 +215,7 @@ impl Runtime {
     }
 
     pub fn stop_current_voice(&mut self) {
-        for slot in 10..=21 {
-            self.sound.stop(slot);
-        }
+        self.sound.stop_voices();
     }
 
     fn configured_auto_delay(&self) -> Duration {
@@ -313,7 +311,10 @@ impl Runtime {
             self.scene.transition_from = None;
             self.scene.transition_progress = 1.0;
             self.effects.finish_transitions(&mut self.scene);
-            if matches!(self.waiting, Waiting::Timer(_) | Waiting::Sound(_)) {
+            if matches!(
+                self.waiting,
+                Waiting::Timer(_) | Waiting::Sound(_) | Waiting::Voice
+            ) {
                 self.waiting = Waiting::Ready;
                 self.drive()?;
             }
@@ -324,9 +325,7 @@ impl Runtime {
         {
             // Voices from the old page must not overlap fast-forwarded text.
             if self.playback.mode.skips() {
-                for slot in 10..=21 {
-                    self.sound.stop(slot);
-                }
+                self.stop_current_voice();
             }
             self.advance()?;
             return Ok(true);

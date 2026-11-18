@@ -16,6 +16,14 @@ use std::{
 
 pub const DEFAULT_SCRIPT: &str = "yks\\story\\common\\PROLOGUE1.YKS";
 pub const PLAY_SCRIPT: &str = "yks\\root\\root_Common.yks";
+/// Character order from Dousei's select01/select02 scripts.
+pub const DOUSEI_ROUTES: [&str; 5] = [
+    "yks\\root\\root_kaho.yks",
+    "yks\\root\\root_tugumi.yks",
+    "yks\\root\\root_tinatu.yks",
+    "yks\\root\\root_satuki.yks",
+    "yks\\root\\root_nanako.yks",
+];
 
 mod extras;
 mod graphics_host;
@@ -43,6 +51,7 @@ enum Waiting {
     Key,
     Timer(Instant),
     Sound(i32),
+    Voice,
     Choice,
     Movie,
 }
@@ -200,10 +209,19 @@ impl Runtime {
                 text_value(name),
             )?;
         }
+        let mut sound = Sound::new(muted);
+        if !resources.contains(PLAY_SCRIPT)
+            && DOUSEI_ROUTES.iter().all(|route| resources.contains(route))
+        {
+            // Dousei's OptionVoice assigns three supporting-character slots.
+            for (group, slot) in [(15, 26), (16, 27), (17, 25)] {
+                sound.group_set(group, slot, slot)?;
+            }
+        }
         let mut runtime = Self {
             scene: Scene::default(),
             resources,
-            sound: Sound::new(muted),
+            sound,
             stack: vec![Activation {
                 name: entry.into(),
                 vm,
@@ -292,6 +310,11 @@ impl Runtime {
             self.set_playback_mode("manual")?;
             return Ok(());
         }
+        if matches!(self.waiting, Waiting::Voice) {
+            self.stop_current_voice();
+            self.waiting = Waiting::Ready;
+            return self.drive();
+        }
         if matches!(self.waiting, Waiting::Key) {
             if self.page_limit != 0 && self.pages >= self.page_limit {
                 self.scene.finished = true;
@@ -343,6 +366,7 @@ impl Runtime {
         let ready = match self.waiting {
             Waiting::Timer(deadline) => now >= deadline,
             Waiting::Sound(slot) => !self.sound.is_playing(slot),
+            Waiting::Voice => !self.voice_playing(),
             _ => false,
         };
         if ready {
@@ -686,14 +710,19 @@ impl Runtime {
                 let (name, coordinates) = match args.len() {
                     2 => (string(args, 1)?, None),
                     4 => (string(args, 1)?, Some((int(args, 2)?, int(args, 3)?))),
-                    5 => {
+                    3 | 5 => {
                         let mask = string(args, 2)?;
                         if !mask.to_ascii_lowercase().ends_with(".ykg") {
                             return Err("external PNG/BMP alpha import is not implemented".into());
                         }
                         // This executable's YKG mask branch calls the ordinary YKG loader,
                         // replacing the color image. See docs/playback-semantics.md.
-                        (mask, Some((int(args, 3)?, int(args, 4)?)))
+                        let coordinates = if args.len() == 5 {
+                            Some((int(args, 3)?, int(args, 4)?))
+                        } else {
+                            None
+                        };
+                        (mask, coordinates)
                     }
                     _ => return Err("unsupported GraphicLoad argument count".into()),
                 };
@@ -813,6 +842,12 @@ impl Runtime {
                 self.waiting = Waiting::Key;
                 self.record_dialogue();
             }
+            "KeyVoiceWait" => {
+                self.sound.mark_voice_boundary();
+                if !fast && self.voice_playing() {
+                    self.waiting = Waiting::Voice;
+                }
+            }
             "PF" => {
                 self.page_voice_paths.clear();
                 if args.is_empty() {
@@ -847,8 +882,7 @@ impl Runtime {
                 } else {
                     self.sound.play(slot, function == "SoundPlayLoop")?;
                 }
-                // The supplied voiceSetting/createHistory scripts map voice groups to slots 10..21.
-                if (10..=21).contains(&slot)
+                if self.sound.is_voice_slot(slot)
                     && let Some((_, state)) = self
                         .sound
                         .snapshot()
