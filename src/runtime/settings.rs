@@ -330,6 +330,35 @@ impl Runtime {
         Ok(())
     }
 
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn play_route_audio(&mut self) -> Result<()> {
+        if !self.sound.is_voice_slot(25) {
+            return Err("route selection audio requires the Dousei profile".into());
+        }
+        // select01 starts this loop; select02 keeps it without driving either story VM.
+        self.sound.set_paused(false);
+        self.sound.stop(99);
+        let path = "ogg\\bgm\\lv_bgm12.ogg";
+        self.sound.load(1, path, self.resources.read(path)?)?;
+        self.sound.set_streamed(1, true);
+        self.sound.play(1, true)
+    }
+
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn play_ui_sound(&mut self, slot: i32) -> Result<()> {
+        // Start.yks preloads these exact IDs; menu scripts reference 101/102 on hover and 100 on click.
+        let path = match slot {
+            100 => "ogg\\system\\click1.ogg",
+            101 | 102 => "ogg\\system\\cur1.ogg",
+            _ => return Err("UI sound must be native click/hover slot 100, 101, or 102".into()),
+        };
+        // The Activity resets its MediaPlayers when returning to the title or loading a save.
+        // A native SoundState can outlive that reset, so each short effect needs a load event.
+        self.sound.load(slot, path, self.resources.read(path)?)?;
+        self.sound.set_paused(false);
+        self.sound.play(slot, false)
+    }
+
     pub fn player_name(&self) -> PlayerName {
         let value = |id, default: &str| match self.stack.last().and_then(|activation| {
             activation.vm.memory().get(&Slot::StringVariable {
@@ -473,6 +502,50 @@ mod tests {
             assert!(validate(id, value, true).is_ok());
             assert!(validate(id, 1001, true).is_err());
         }
+    }
+
+    #[test]
+    #[ignore = "requires the original FD through YUKA_TEST_DOUSEI"]
+    fn dousei_route_and_button_audio_preserve_paused_story_and_native_sound_slots() -> Result<()> {
+        let game = PathBuf::from(std::env::var("YUKA_TEST_DOUSEI")?);
+        let mut runtime =
+            Runtime::new_unstarted(&game, DOUSEI_ROUTES[0], TextEncoding::Gbk, true, true, 0)?;
+        runtime.set_paused(true);
+        let pc = runtime.stack.last().unwrap().vm.pc;
+        runtime.play_route_audio()?;
+        let states = runtime.sound.snapshot();
+        let music = &states.iter().find(|(id, _)| *id == 1).unwrap().1;
+        assert_eq!(music.path, "ogg\\bgm\\lv_bgm12.ogg");
+        assert!(music.playing && music.looping && music.streamed);
+        runtime.update_settings([(101, 275)].into())?;
+        for slot in [100, 101, 102] {
+            runtime.play_ui_sound(slot)?;
+        }
+        runtime.play_ui_sound(100)?;
+        let states = runtime.sound.snapshot();
+        for slot in [100, 101, 102] {
+            let sound = &states.iter().find(|(id, _)| *id == slot).unwrap().1;
+            assert!(sound.playing && !sound.looping);
+            assert_eq!(
+                sound.path,
+                if slot == 100 {
+                    "ogg\\system\\click1.ogg"
+                } else {
+                    "ogg\\system\\cur1.ogg"
+                }
+            );
+        }
+        assert!(runtime.play_ui_sound(99).is_err());
+        assert!(runtime.play_ui_sound(105).is_err());
+        assert_eq!(runtime.stack.last().unwrap().vm.pc, pc);
+        assert_eq!(runtime.instructions, 0);
+        assert_eq!(runtime.pages, 0);
+        assert!(runtime.paused_at.is_some());
+        assert_eq!(runtime.global_flag(101), 275);
+        // The guard depends on the same profile setup as FD voice group 17.
+        runtime.sound.group_set(17, 24, 24)?;
+        assert!(runtime.play_route_audio().is_err());
+        Ok(())
     }
 
     #[test]

@@ -10,9 +10,16 @@ final class OriginalSettingsAssets {
     static final String[] BACKGROUNDS = {"op_base_screen", "op_base_text01", "op_base_text02", "op_base_sound",
         "op_base_voice01", "op_base_voice02", "op_base_voice03", "op_base_voice04"};
     private final Map<String, Bitmap> images = new HashMap<>();
+    final boolean dousei;
+
+    private OriginalSettingsAssets(boolean dousei) { this.dousei = dousei; }
 
     static OriginalSettingsAssets load(long session) {
-        OriginalSettingsAssets result = new OriginalSettingsAssets();
+        return load(session, false);
+    }
+
+    static OriginalSettingsAssets load(long session, boolean dousei) {
+        OriginalSettingsAssets result = new OriginalSettingsAssets(dousei);
         for (String name : BACKGROUNDS) result.load(session, name, 0);
         result.load(session, "op_btn01", 51);
         result.load(session, "op_page", 12);

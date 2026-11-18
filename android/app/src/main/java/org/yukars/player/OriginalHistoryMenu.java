@@ -22,6 +22,8 @@ final class OriginalHistoryMenu {
     private final Listener listener;
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
     private final List<Entry> entries = new ArrayList<>();
+    private final int textColor;
+    private final int selectedTextColor;
     private float scroll;
     private float totalHeight;
     private boolean draggingBar;
@@ -39,16 +41,20 @@ final class OriginalHistoryMenu {
     OriginalHistoryMenu(OriginalAssets assets, JSONArray history, Listener listener) {
         this.assets = assets;
         this.listener = listener;
+        textColor = assets == null ? Color.WHITE : assets.isDousei() ? 0xffdadada : 0xff163d55;
+        selectedTextColor = assets != null && assets.isDousei() ? 0xfff3ff91 : textColor;
         TextPaint textPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
         textPaint.setTextSize(25f);
-        textPaint.setColor(assets != null ? 0xff163d55 : Color.WHITE);
+        textPaint.setColor(textColor);
         for (int index = 0; index < history.length(); index++) {
             JSONObject entry = history.optJSONObject(index);
             if (entry == null) continue;
             String speaker = entry.optString("speaker");
             String value = (speaker.isEmpty() ? "" : "【" + speaker + "】\n") + entry.optString("dialogue");
-            StaticLayout layout = StaticLayout.Builder.obtain(value, 0, value.length(), textPaint, 665)
-                .setAlignment(Layout.Alignment.ALIGN_NORMAL).setLineSpacing(5f, 1f).setIncludePad(false).build();
+            StaticLayout layout = StaticLayout.Builder.obtain(value, 0, value.length(), textPaint, 675)
+                .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+                .setLineSpacing(assets != null && assets.isDousei() ? 40f - textPaint.getFontSpacing() : 5f, 1f)
+                .setIncludePad(false).build();
             JSONArray voices = entry.optJSONArray("voices");
             entries.add(new Entry(entry.optLong("id"), voices != null && voices.length() > 0, layout, totalHeight));
             totalHeight += layout.getHeight() + 24;
@@ -82,25 +88,28 @@ final class OriginalHistoryMenu {
         } else canvas.drawBitmap(assets.bitmap("his_gage", draggingBar ? 1 : 0), 766, 122 + fraction * 359, paint);
         canvas.save();
         canvas.clipRect(16, TOP, 745, BOTTOM);
-        if (entries.isEmpty()) {
+        if (entries.isEmpty() && assets == null) {
             TextPaint empty = new TextPaint(Paint.ANTI_ALIAS_FLAG);
-            empty.setTextSize(25); empty.setColor(assets != null ? 0xff163d55 : Color.WHITE);
+            empty.setTextSize(25); empty.setColor(textColor);
             canvas.drawText("暂无对话履历", 70, 110, empty);
         }
         for (Entry entry : entries) {
             float y = TOP + entry.y - scroll;
             if (y > BOTTOM || y + entry.text.getHeight() < TOP) continue;
+            boolean pressed = entry.voice && new RectF(16, y, 745, y + entry.text.getHeight()).contains(pressedX, pressedY);
             if (entry.voice) {
-                boolean pressed = new RectF(16, y, 65, y + 40).contains(pressedX, pressedY);
                 if (assets != null) canvas.drawBitmap(assets.bitmap("sb_rireki_voice", pressed ? 1 : 0), 20, y, paint);
                 else plainButton(canvas, "▶", 20, y, pressed);
             }
+            entry.text.getPaint().setColor(pressed ? selectedTextColor : textColor);
             canvas.save(); canvas.translate(70, y); entry.text.draw(canvas); canvas.restore();
         }
         canvas.restore();
-        paint.setColor(assets != null ? 0xff163d55 : Color.WHITE);
-        paint.setTextSize(15f);
-        canvas.drawText("上下滑动查看履历 · 点击喇叭重听语音", 70, 554, paint);
+        if (assets == null) {
+            paint.setColor(textColor);
+            paint.setTextSize(15f);
+            canvas.drawText("上下滑动查看履历 · 点击喇叭重听语音", 70, 554, paint);
+        }
         paint.setColor(Color.WHITE);
     }
 
@@ -131,6 +140,30 @@ final class OriginalHistoryMenu {
 
     void end() { draggingBar = false; }
 
+    boolean hitTest(float x, float y) {
+        if (new RectF(756, 15, 796, 56).contains(x, y)
+                || new RectF(756, 59, 796, 100).contains(x, y)
+                || new RectF(756, 545, 796, 586).contains(x, y)
+                || new RectF(766, 122, 786, 521).contains(x, y)) return true;
+        return voiceAt(x, y) != null;
+    }
+
+    int soundSlot(float x, float y, boolean hover) {
+        if (hover && (new RectF(756, 15, 796, 56).contains(x, y)
+                || new RectF(756, 59, 796, 100).contains(x, y)
+                || new RectF(756, 545, 796, 586).contains(x, y))) return 101;
+        return -1;
+    }
+
+    private Entry voiceAt(float x, float y) {
+        if (x < 16 || x > 65 || y < TOP || y >= BOTTOM) return null;
+        for (Entry entry : entries) {
+            float top = TOP + entry.y - scroll;
+            if (entry.voice && y >= top && y < top + 40) return entry;
+        }
+        return null;
+    }
+
     void tap(float x, float y) {
         if (x >= 756) {
             if (y >= 15 && y < 56) listener.close();
@@ -138,11 +171,7 @@ final class OriginalHistoryMenu {
             else if (y >= 545 && y < 586) move(330);
             return;
         }
-        if (x >= 16 && x <= 65 && y >= TOP && y < BOTTOM) {
-            for (Entry entry : entries) {
-                float top = TOP + entry.y - scroll;
-                if (entry.voice && y >= top && y < top + 40) { listener.voice(entry.id); return; }
-            }
-        }
+        Entry voice = voiceAt(x, y);
+        if (voice != null) listener.voice(voice.id);
     }
 }

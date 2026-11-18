@@ -350,7 +350,8 @@ impl Runtime {
         })
     }
 
-    /// item=1..17 is a CG; item=20..24 is a scene thumbnail. Variant encodes style*10000+frame.
+    /// item=1..17 is a CG; item=20..24 is a scene thumbnail. Nonnegative variants
+    /// encode style*10000+frame; -1 and -2 select normal and hovered thumbnails.
     pub fn extras_image(
         &mut self,
         character: usize,
@@ -369,8 +370,9 @@ impl Runtime {
         }
         .ok_or("invalid extra item")?;
         let unlocked = self.extra_global(200) != 0 && self.extra_global(entry.unlock) == 1;
-        if variant == -1 {
-            return self.ui_image(if unlocked { &entry.thumbnail } else { NO_DATA }, 0);
+        if matches!(variant, -1 | -2) {
+            let sequence = i32::from(unlocked && variant == -2);
+            return self.ui_image(if unlocked { &entry.thumbnail } else { NO_DATA }, sequence);
         }
         if !unlocked {
             return Err("extra image is locked by the original progress flags".into());
@@ -500,6 +502,9 @@ mod tests {
         assert!(!info.enabled);
         assert!(runtime.extras_music(1).is_err());
         assert!(runtime.extras_image(1, 1, 20000).is_err());
+        let locked_thumbnail = runtime.extras_image(1, 1, -1)?;
+        assert_eq!(locked_thumbnail.dimensions(), (100, 75));
+        assert_eq!(runtime.extras_image(1, 1, -2)?, locked_thumbnail);
         assert!(runtime.extras_replay(1, 1, 2).is_err());
         let scratch =
             PathBuf::from("evidence/extras-fd-test-io").join(std::process::id().to_string());
@@ -515,6 +520,14 @@ mod tests {
         assert!(!info.pages[1].images[1].unlocked && !info.pages[1].scenes[1].unlocked);
         assert!(runtime.extras_image(1, 2, 0).is_err());
         assert!(runtime.extras_replay(1, 2, 0).is_err());
+        let normal_thumbnail = runtime.extras_image(1, 1, -1)?;
+        let hovered_thumbnail = runtime.extras_image(1, 1, -2)?;
+        assert_eq!(hovered_thumbnail.dimensions(), (100, 75));
+        assert_ne!(normal_thumbnail, hovered_thumbnail);
+        assert_eq!(
+            hovered_thumbnail,
+            runtime.ui_image(&catalog.pages[1].images[0].thumbnail, 1)?
+        );
         assert_eq!(runtime.extras_image(1, 1, 20000)?.dimensions(), (800, 600));
         runtime.extras_music(32)?;
         assert!(

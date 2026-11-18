@@ -13,6 +13,7 @@ interface ExtrasMenu {
     }
 
     void draw(Canvas canvas, float pressedX, float pressedY);
+    default int soundSlot(float x, float y, boolean hover) { return -1; }
     void tap(float x, float y);
     void back();
     void release();

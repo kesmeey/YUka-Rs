@@ -466,6 +466,10 @@ pub extern "system" fn Java_org_yukars_player_NativeBridge_command(
                     player.runtime.play_title_audio(true)?;
                 }
                 "title_audio" if player.title => player.runtime.play_title_audio(false)?,
+                "route_audio" if player.title && player.dousei => {
+                    player.runtime.play_route_audio()?
+                }
+                "ui_sound" => player.runtime.play_ui_sound(argument.parse()?)?,
                 "menu_audio" => player.runtime.resume_menu_audio(),
                 "save" => player.runtime.save_native(Path::new(&argument))?,
                 "save_with_comment" => {

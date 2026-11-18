@@ -29,6 +29,11 @@ final class OriginalSettingsMenu {
     private static final int[][] VOICE_FLAGS = {{102, 103, 104}, {110, 111, 112, 113, 114},
         {115, 116, 117, 120}, {118, 119, 121}};
     private static final int[][] VOICE_SAMPLES = {{0, 1, 2}, {3, 4, 5, 6, 7}, {8, 9, 10, 11}, {12, 13, 14}};
+    // m_voice03/04 add Mai, Siori and Ituki in the FD, in their original displayed order.
+    private static final int[][] DOUSEI_VOICE_FLAGS = {{102, 103, 104}, {110, 111, 112, 113, 114},
+        {115, 116, 117, 123, 122}, {118, 119, 124, 120, 121}};
+    private static final int[][] DOUSEI_VOICE_SAMPLES = {{0, 1, 2}, {3, 4, 5, 6, 7},
+        {8, 9, 10, 16, 15}, {12, 13, 17, 11, 14}};
 
     final int page;
     private final OriginalAssets common;
@@ -97,7 +102,7 @@ final class OriginalSettingsMenu {
             sliders.add(new Slider(100, 128));
             sliders.add(new Slider(101, 227));
         } else {
-            int[] ids = VOICE_FLAGS[page - 4];
+            int[] ids = (artwork.dousei ? DOUSEI_VOICE_FLAGS : VOICE_FLAGS)[page - 4];
             for (int index = 0; index < ids.length; index++) sliders.add(new Slider(ids[index], 128 + index * 99));
         }
     }
@@ -109,7 +114,7 @@ final class OriginalSettingsMenu {
 
     void draw(Canvas canvas, float px, float py) {
         image(canvas, common.bitmap("op_base", -1), 0, 0);
-        image(canvas, common.bitmap("op_title", page), 15, 20);
+        image(canvas, common.bitmap("op_title", artwork.dousei && page >= 4 ? 4 : page), 15, 20);
         image(canvas, artwork.bitmap(OriginalSettingsAssets.BACKGROUNDS[page], -1), 56, 65);
         int selected = page == 0 ? 0 : page <= 2 ? 1 : page == 3 ? 2 : 3;
         for (int index = 0; index < NAV_Y.length; index++) {
@@ -131,10 +136,12 @@ final class OriginalSettingsMenu {
             image(canvas, artwork.bitmap("op_var", 0), 130 + sliderPosition(slider.flag), slider.y - 14);
             if (page >= 3) drawSoundButtons(canvas, index, px, py);
         }
-        paint.setColor(0xff087cb9);
-        paint.setTextSize(15);
-        canvas.drawText("恢复默认设置", 74, 578, paint);
-        paint.setColor(Color.WHITE);
+        if (!artwork.dousei) {
+            paint.setColor(0xff087cb9);
+            paint.setTextSize(15);
+            canvas.drawText("恢复默认设置", 74, 578, paint);
+            paint.setColor(Color.WHITE);
+        }
         if (confirming()) {
             image(canvas, common.bitmap("YesNo_Base", -1), 0, 0);
             int prompt = navigation == OriginalSaveMenu.Action.PREVIOUS_CHOICE ? 4
@@ -158,8 +165,10 @@ final class OriginalSettingsMenu {
     private void drawSoundButtons(Canvas canvas, int row, float px, float py) {
         int y = 81 + 99 * row;
         if (page != 3 || row != 0)
-            image(canvas, artwork.bitmap("op_sound_test", inside(px, py, 361, y, 72, 20) ? 2 : 0), 361, y);
-        image(canvas, artwork.bitmap("op_sound_test", inside(px, py, 443, y, 72, 20) ? 3 : 1), 443, y);
+            image(canvas, artwork.bitmap("op_sound_test", inside(px, py, 361, y, 72, 20) ? (artwork.dousei ? 1 : 2) : 0), 361, y);
+        image(canvas, artwork.bitmap("op_sound_test", artwork.dousei
+            ? (inside(px, py, 443, y, 72, 20) ? 4 : 3)
+            : (inside(px, py, 443, y, 72, 20) ? 3 : 1)), 443, y);
     }
 
     private int sliderPosition(int flag) {
@@ -192,6 +201,25 @@ final class OriginalSettingsMenu {
     }
     void drag(float x, float y, float deltaY) { if (dragging != null) setSlider(dragging, x); }
     void end() { dragging = null; }
+
+    int soundSlot(float x, float y, boolean hover) {
+        if (confirming()) return inside(x, y, 200, 341, 166, 42) || inside(x, y, 434, 341, 166, 42)
+            ? (hover ? 102 : 100) : -1;
+        int selected = page == 0 ? 0 : page <= 2 ? 1 : page == 3 ? 2 : 3;
+        for (int index = 0; index < NAV_Y.length; index++)
+            if (index != selected && (index != 4 || canSave) && inside(x, y, 656, NAV_Y[index], 144, 25))
+                return hover ? 101 : 100;
+        if (page == 1 || page == 2) {
+            for (int index = 0; index < 2; index++)
+                if (page != index + 1 && inside(x, y, 447 + index * 84, 37, 82, 28)) return hover ? 101 : 100;
+        } else if (page >= 4) {
+            for (int index = 0; index < 4; index++)
+                if (page != index + 4 && inside(x, y, 279 + index * 84, 37, 82, 28)) return hover ? 101 : 100;
+        }
+        for (Radio radio : radios)
+            if (value(radio.flag) != radio.value && radio.bounds.contains(x, y)) return hover ? 102 : 100;
+        return -1;
+    }
 
     void tap(float x, float y) {
         if (confirming()) {
@@ -226,11 +254,13 @@ final class OriginalSettingsMenu {
                 int y0 = 81 + 99 * row;
                 if (inside(x, y, 443, y0, 72, 20)) { change(sliders.get(row).flag, 0); return; }
                 if ((page != 3 || row != 0) && inside(x, y, 361, y0, 72, 20)) {
-                    listener.sample(page == 3 ? -1 : VOICE_SAMPLES[page - 4][row]); return;
+                    listener.sample(page == 3 ? (artwork.dousei ? 18 : -1)
+                        : (artwork.dousei ? DOUSEI_VOICE_SAMPLES : VOICE_SAMPLES)[page - 4][row]); return;
                 }
             }
         }
-        if (inside(x, y, 65, 557, 180, 35)) listener.defaults(page == 0 ? 1 : page <= 2 ? 2 : page == 3 ? 3 : 4);
+        if (!artwork.dousei && inside(x, y, 65, 557, 180, 35))
+            listener.defaults(page == 0 ? 1 : page <= 2 ? 2 : page == 3 ? 3 : 4);
     }
 
     private void image(Canvas canvas, android.graphics.Bitmap bitmap, float x, float y) { canvas.drawBitmap(bitmap, x, y, paint); }

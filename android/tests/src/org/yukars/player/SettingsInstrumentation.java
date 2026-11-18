@@ -21,6 +21,7 @@ import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -56,10 +57,12 @@ public final class SettingsInstrumentation extends Instrumentation {
             summary.put("scratch", scratch.getAbsolutePath());
             session = NativeBridge.create(game, saves.getAbsolutePath(), audio.getAbsolutePath());
             require(session != 0, "native session creation failed");
+            boolean dousei = NativeBridge.isDousei(session);
+            summary.put("profile", dousei ? "dousei" : "loverable");
 
             stage = "original_option_art";
-            OriginalAssets common = OriginalAssets.load(session);
-            OriginalSettingsAssets artwork = OriginalSettingsAssets.load(session);
+            OriginalAssets common = dousei ? OriginalAssets.loadDousei(session) : OriginalAssets.load(session);
+            OriginalSettingsAssets artwork = OriginalSettingsAssets.load(session, dousei);
             for (String name : OriginalSettingsAssets.BACKGROUNDS) {
                 Bitmap bitmap = artwork.bitmap(name, -1);
                 require(bitmap.getWidth() == 528 && bitmap.getHeight() == 495, "incorrect original option background size: " + name);
@@ -89,6 +92,17 @@ public final class SettingsInstrumentation extends Instrumentation {
                     }
                 }
                 require(verifiedLabel, "original option page has no opaque heading pixel");
+                if (dousei) {
+                    checkOpaquePixels(image, common.bitmap("op_title", page >= 4 ? 4 : page), 15, 20, 220);
+                    if (page >= 3) {
+                        int rows = page == 3 ? 2 : page == 4 ? 3 : 5;
+                        for (int row = 0; row < rows; row++) {
+                            if (page != 3 || row != 0)
+                                checkOpaquePixels(image, artwork.bitmap("op_sound_test", 0), 361, 81 + row * 99, 72);
+                            checkOpaquePixels(image, artwork.bitmap("op_sound_test", 3), 443, 81 + row * 99, 72);
+                        }
+                    }
+                }
                 try (FileOutputStream output = new FileOutputStream(new File(scratch, "settings-page-" + page + ".png"))) {
                     require(image.compress(Bitmap.CompressFormat.PNG, 100, output), "PNG encoding failed");
                 } finally { image.recycle(); }
@@ -103,7 +117,8 @@ public final class SettingsInstrumentation extends Instrumentation {
                 menu.tap(700, 470); menu.tap(280, 360);
                 require(listener.action == OriginalSaveMenu.Action.TITLE, "confirmed title navigation did not dispatch");
                 menu.tap(140, 572);
-                require(listener.section == (page == 0 ? 1 : page <= 2 ? 2 : page == 3 ? 3 : 4), "wrong defaults group");
+                require(listener.section == (dousei ? -1 : page == 0 ? 1 : page <= 2 ? 2 : page == 3 ? 3 : 4),
+                    "wrong defaults group or extra control absent from the original FD menu");
             }
             summary.put("all_eight_pages_navigation_and_confirmation", true);
 
@@ -130,8 +145,12 @@ public final class SettingsInstrumentation extends Instrumentation {
             summary.put("screen_and_text_controls", true);
 
             stage = "sound_voice_sliders_mutes_and_test_buttons";
-            int[][] flags = {{100, 101}, {102, 103, 104}, {110, 111, 112, 113, 114}, {115, 116, 117, 120}, {118, 119, 121}};
-            int[][] samples = {{-1}, {0, 1, 2}, {3, 4, 5, 6, 7}, {8, 9, 10, 11}, {12, 13, 14}};
+            int[][] flags = dousei
+                ? new int[][]{{100, 101}, {102, 103, 104}, {110, 111, 112, 113, 114}, {115, 116, 117, 123, 122}, {118, 119, 124, 120, 121}}
+                : new int[][]{{100, 101}, {102, 103, 104}, {110, 111, 112, 113, 114}, {115, 116, 117, 120}, {118, 119, 121}};
+            int[][] samples = dousei
+                ? new int[][]{{18}, {0, 1, 2}, {3, 4, 5, 6, 7}, {8, 9, 10, 16, 15}, {12, 13, 17, 11, 14}}
+                : new int[][]{{-1}, {0, 1, 2}, {3, 4, 5, 6, 7}, {8, 9, 10, 11}, {12, 13, 14}};
             List<Integer> actualSamples = new ArrayList<>();
             for (int page = 3; page < 8; page++) {
                 menu = menu(common, artwork, page, listener);
@@ -152,10 +171,12 @@ public final class SettingsInstrumentation extends Instrumentation {
             List<Integer> expectedSamples = new ArrayList<>();
             for (int[] pageSamples : samples) for (int sample : pageSamples) expectedSamples.add(sample);
             require(actualSamples.equals(expectedSamples), "voice sample buttons do not match displayed characters");
+            summary.put("sample_buttons_checked", actualSamples.size());
             summary.put("all_volume_sliders_mutes_and_samples", true);
 
             stage = "native_settings_persist_without_running_story";
             JSONObject patch = new JSONObject("{\"2\":1,\"3\":1,\"4\":4,\"5\":4200,\"10\":2,\"11\":1,\"12\":0,\"13\":0,\"14\":2,\"15\":2,\"16\":1,\"100\":0,\"101\":300,\"111\":250}");
+            if (dousei) patch.put("122", 432).put("123", 543).put("124", 654);
             NativeBridge.command(session, "settings", patch.toString());
             JSONObject state = new JSONObject(NativeBridge.state(session));
             JSONObject savedFlags = state.getJSONObject("settings").getJSONObject("flags");
@@ -178,6 +199,7 @@ public final class SettingsInstrumentation extends Instrumentation {
             summary.put("complete_save_import_staging_backup_publish", true);
             stage = "actual_activity_option_controls";
             checkActivity(scratch);
+            if (dousei) summary.put("fd_menu_audio_after_title_reset", true);
             summary.put("actual_activity_option_controls", true).put("passed", true);
             code = Activity.RESULT_OK;
         } catch (Throwable error) {
@@ -248,6 +270,7 @@ public final class SettingsInstrumentation extends Instrumentation {
         require(Arrays.equals(Files.readAllBytes(new File(backup, "savedata.001").toPath()), previousSlot), "publication changed the recoverable backup");
     }
 
+    @SuppressWarnings("deprecation")
     private void checkActivity(File scratch) throws Exception {
         MainActivity activity = (MainActivity) startActivitySync(new Intent(Intent.ACTION_MAIN)
             .setClassName(getTargetContext(), "org.yukars.player.MainActivity")
@@ -287,6 +310,11 @@ public final class SettingsInstrumentation extends Instrumentation {
             await(() -> ((OriginalSettingsMenu) field(activity, "settingsMenu")).page == 3, 5000, "sound settings navigation failed");
             touch(gameView, 480, 190, 480, 190);
             await(() -> activityFlags(gameView).optInt("101") == 0, 3000, "SE mute button did not apply");
+            boolean dousei = Boolean.TRUE.equals(field(activity, "douseiMode"));
+            if (dousei) {
+                touch(gameView, 138, 227, 468, 227);
+                await(() -> activityFlags(gameView).optInt("101") == 1000, 3000, "SE volume did not restore for menu audio test");
+            }
             touch(gameView, 700, 197, 700, 197);
             await(() -> ((OriginalSettingsMenu) field(activity, "settingsMenu")).page == 0, 5000, "screen settings navigation failed");
             touch(gameView, 450, 430, 450, 430);
@@ -295,6 +323,26 @@ public final class SettingsInstrumentation extends Instrumentation {
             touch(gameView, 700, 502, 700, 502);
             await(() -> field(activity, "settingsMenu") == null && "TITLE".equals(String.valueOf(field(activity, "mode"))),
                 3000, "return from title settings did not restore the title");
+            if (dousei) {
+                touch(gameView, 390, 299, 390, 299);
+                await(() -> Boolean.TRUE.equals(field(activity, "douseiSelecting"))
+                    && !Boolean.TRUE.equals(field(activity, "busy")) && !Boolean.TRUE.equals(field(activity, "actionPending")),
+                    5000, "FD route selection did not open for audio reset test");
+                runOnMainSync(activity::onBackPressed);
+                await(() -> !Boolean.TRUE.equals(field(activity, "douseiSelecting"))
+                    && !Boolean.TRUE.equals(field(activity, "busy")) && !Boolean.TRUE.equals(field(activity, "actionPending")),
+                    5000, "FD selection cancellation did not restore the title");
+                touch(gameView, 390, 409, 390, 409);
+                await(() -> field(activity, "settingsMenu") != null, 5000, "FD options did not reopen after audio reset");
+                await(() -> menuAudioPrepared(activity), 5000, "FD hover/click MediaPlayers were lost after returning to title");
+                synchronized (field(gameView, "frameLock")) {
+                    JSONObject state = new JSONObject(field(gameView, "state").toString());
+                    require(state.isNull("audio_warning") || state.optString("audio_warning").isEmpty(),
+                        "FD menu audio reported a warning after returning to title");
+                }
+                screenshot(gameView, new File(scratch, "activity-settings-after-title-audio-reset.png"));
+                touch(gameView, 700, 502, 700, 502);
+            }
         } finally {
             if (original != null) {
                 JSONObject restore = original;
@@ -307,6 +355,25 @@ public final class SettingsInstrumentation extends Instrumentation {
             }
             runOnMainSync(activity::finish);
         }
+    }
+
+    private static boolean menuAudioPrepared(MainActivity activity) throws Exception {
+        boolean[] ready = {false};
+        Throwable[] failure = {null};
+        CountDownLatch inspected = new CountDownLatch(1);
+        ((Handler) field(activity, "engine")).post(() -> {
+            try {
+                Map<?, ?> slots = (Map<?, ?>) uncheckedField(uncheckedField(activity, "audio"), "slots");
+                Object click = slots.get(100), hover = slots.get(101);
+                ready[0] = click != null && hover != null
+                    && Boolean.TRUE.equals(uncheckedField(click, "prepared"))
+                    && Boolean.TRUE.equals(uncheckedField(hover, "prepared"));
+            } catch (Throwable error) { failure[0] = error; }
+            finally { inspected.countDown(); }
+        });
+        require(inspected.await(5, TimeUnit.SECONDS), "Inspecting menu audio on the engine thread timed out");
+        if (failure[0] != null) throw new IllegalStateException("Could not inspect menu audio", failure[0]);
+        return ready[0];
     }
 
     private static Object field(Object owner, String name) throws Exception {
@@ -362,8 +429,10 @@ public final class SettingsInstrumentation extends Instrumentation {
     private void checkSheet(OriginalSettingsAssets artwork, String name, int count, int rows, int width, int height) throws IOException {
         Bitmap sheet = OriginalAssets.decode(NativeBridge.image(session, "ykg\\system\\option\\" + name + ".ykg", -1));
         for (int index = 0; index < count; index++) {
-            int x = name.equals("op_btn01") ? index / rows * width : index % rows * width;
-            int y = name.equals("op_btn01") ? index % rows * height : index / rows * height;
+            boolean columnFirst = name.equals("op_btn01") || (artwork.dousei && name.equals("op_sound_test"));
+            int entriesPerColumn = name.equals("op_sound_test") ? 3 : rows;
+            int x = columnFirst ? index / entriesPerColumn * width : index % rows * width;
+            int y = columnFirst ? index % entriesPerColumn * height : index / rows * height;
             Bitmap frame = artwork.bitmap(name, index);
             require(frame.getWidth() == width && frame.getHeight() == height, "sprite dimensions differ: " + name);
             int[] expected = new int[width * height]; int[] actual = new int[expected.length];
@@ -372,6 +441,20 @@ public final class SettingsInstrumentation extends Instrumentation {
             require(Arrays.equals(expected, actual), "sprite crop differs: " + name + " " + index);
             imageChecks++; cropChecks++;
         }
+    }
+
+    private void checkOpaquePixels(Bitmap rendered, Bitmap original, int left, int top, int maxWidth) throws IOException {
+        int checked = 0;
+        for (int y = 0; y < original.getHeight(); y++) for (int x = 0; x < Math.min(original.getWidth(), maxWidth); x++) {
+            int pixel = original.getPixel(x, y);
+            if ((pixel >>> 24) == 255) {
+                require(rendered.getPixel(left + x, top + y) == pixel,
+                    "original settings sprite differs at " + (left + x) + "," + (top + y));
+                checked++;
+            }
+        }
+        require(checked > 0, "original settings sprite has no opaque pixels to compare");
+        imageChecks++;
     }
 
     private static void changed(Recording listener, int flag, int value) throws IOException {

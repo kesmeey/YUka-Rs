@@ -3,18 +3,22 @@
 用 Rust 重实现 Yuka System 的项目，面向后续复用原游戏资源的跨平台运行时。
 当前提供 Windows 运行时和 Android 宿主，直接执行原始 YKS 脚本，读取 YKC 内的背景、立绘与 Ogg 音频，支持标题、选择支和存读档。
 
-项目位置为 `E:\llvm-agent\yuka-rs`。本轮以用户提供的《情侣热恋中》汉化版作为真实样本。
+项目位置为 `E:\llvm-agent\yuka-rs`。真实样本为用户提供的《情侣热恋中》及其 FD《同居情侣热恋中》汉化版。
 格式和 VM 位于 library crate，桌面宿主使用 minifb、fontdue、image 和 rodio。
 
 ## 《同居情侣热恋中》FD 安卓版
 
-`bin/Dousei-Loverable-Yuka-Rs-0.2.8.apk` 是用户提供的汉化 FD 资源与 Yuka-Rs 运行时的完整安装包。
+`bin/Dousei-Loverable-Yuka-Rs-0.2.9.apk` 是用户提供的汉化 FD 资源与 Yuka-Rs 运行时的完整安装包。
 FD 使用独立的 `org.yukars.dousei` 包名及存档目录，可以和《情侣热恋中》本篇同时安装。
-从安卓播放器菜单选择角色和 A/B/C 模式后，运行对应的原始剧情脚本。
+从原版标题进入五位女主角选择页，再选择原版 A/B/C 模式，运行对应的原始剧情脚本。
 支持自动阅读、快进、履历、语音重听、手动与快速存读档，以及剧情的片头、片尾视频。
-FD 0.2.8 从 `dousei_cn.exe` 读取应用图标。标题、设置、存档和鉴赏使用独立的安卓布局。
+FD 0.2.9 使用原游戏 YKG 图片和脚本中的坐标、按钮状态，还原标题、角色与模式选择、姓名输入、
+八页设置、存读档、履历和鉴赏界面。标题与角色选择布局已同提供的 PC 截图作像素对照。
+应用图标指定提取 `dousei_cn.exe` 的 RT_ICON 5，与 PC 标题栏的 16×16 图标逐像素相同；
+该 EXE 的 256×256 图标画面不同，不能用“选择最大图标”代替。
 存读档按原版 20 页、每页 5 槽组织，显示原格式缩略图、章节、时间和备注，保护自动存档槽。
 画面、文本、声音和语音设置写入原格式 `System.dat`。鉴赏中的 CG、回想和音乐按游戏的通关进度开放。
+长按标题的“选项设置”或剧情的 SYSTEM 按钮可打开安卓文件工具，导入、备份和导出 PC 存档。
 
 首次启动把四个原始 YKC 无损恢复到应用私有目录，约 4.1 GB，后续启动复用已准备的资源。
 建议手机预留至少 12 GB 可用空间。APK 支持 Android 8.0 及以上的 ARM64 和 x86_64 设备。
@@ -26,11 +30,13 @@ $game = 'D:\gal\love loabe\【PC】同居情侣热恋中\【PC】同居情侣热
 $bundle = '.\target\bundled-dousei\assets'
 python .\android\prepare-game.py $game $bundle --profile dousei
 python .\android\prepare-video.py $game $bundle --movie d_loverable_OP.mpg --movie d_loverable_ED.mpg
-.\android\build.ps1 -BundleDirectory $bundle -IconExecutable (Join-Path $game 'dousei_cn.exe')
+.\android\build.ps1 -BundleDirectory $bundle -IconExecutable (Join-Path $game 'dousei_cn.exe') -IconResourceId 5
 ```
 
 四档与两部视频随包提供。原版程序、个人存档和全 CG 配置从本地资源目录分开保留。
 验收记录见 [Android 测试记录](android/TESTING.md)。
+剧情文字仍使用 Android 字体，系统内置等待箭头、转场和菜单动画的兼容边界见下方说明；
+界面资源对齐不代表已经完成全部路线的逐帧音画验证。
 
 ## 语音重叠修复 0.2.6
 

@@ -13,8 +13,9 @@ import java.util.Date;
 import java.util.Locale;
 import org.json.JSONObject;
 
-/** Layout and slot numbering from Loverable's m_save.yks / m_load.yks. */
+/** Layout and slot numbering shared by the supplied games' m_save.yks / m_load.yks. */
 final class OriginalSaveMenu {
+    private static final int[] SIDEBAR_Y = {185, 217, 249, 281, 338, 370, 426, 458, 490, 546};
     enum Action { SAVE, LOAD, OPTIONS, SCREEN, TEXT, SOUND, VOICE, PREVIOUS_CHOICE, TITLE, RETURN, EXIT }
     interface Listener {
         void page(int page);
@@ -77,7 +78,7 @@ final class OriginalSaveMenu {
         this.row = Math.max(1, Math.min(5, row));
         this.listener = listener;
         text.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
-        text.setColor(Color.BLACK);
+        text.setColor(assets.isDousei() ? 0xff877467 : Color.BLACK);
         text.setTextSize(14);
     }
 
@@ -108,7 +109,7 @@ final class OriginalSaveMenu {
             int y = 80 + 49 * (index % 10);
             image(canvas, pages, index + (index == page || inside(pressedX, pressedY, x, y, 40, 40) ? 20 : 0), x, y);
         }
-        int[] positions = {185, 217, 249, 281, 338, 370, 426, 458, 490, 546};
+        int[] positions = SIDEBAR_Y;
         for (int index = 0; index < positions.length; index++) {
             int sequence = index + 1;
             if ((saving && sequence == 5) || (!saving && sequence == 6)) sequence += 22;
@@ -138,7 +139,7 @@ final class OriginalSaveMenu {
             if (inside(x, y, 46, 80 + 98 * index, 502, 89)) { listener.slot(index + 1); return; }
         for (int index = 0; index < 20; index++)
             if (inside(x, y, index < 10 ? 557 : 602, 80 + 49 * (index % 10), 40, 40)) { listener.page(index); return; }
-        int[] positions = {185, 217, 249, 281, 338, 370, 426, 458, 490, 546};
+        int[] positions = SIDEBAR_Y;
         Action[] actions = {Action.SCREEN, Action.TEXT, Action.SOUND, Action.VOICE,
             Action.SAVE, Action.LOAD, Action.PREVIOUS_CHOICE, Action.TITLE, Action.RETURN, Action.EXIT};
         for (int index = 0; index < positions.length; index++)
@@ -146,6 +147,22 @@ final class OriginalSaveMenu {
     }
 
     boolean confirming() { return confirmation >= 0 || navigation != null; }
+
+    boolean hitTest(float x, float y) {
+        return soundSlot(x, y, false) >= 0;
+    }
+
+    int soundSlot(float x, float y, boolean hover) {
+        if (confirming()) return inside(x, y, 200, 341, 166, 42) || inside(x, y, 434, 341, 166, 42)
+            ? (hover ? 102 : 100) : -1;
+        for (int index = 0; index < 5; index++)
+            if (inside(x, y, 46, 80 + 98 * index, 502, 89)) return hover ? 102 : 100;
+        for (int index = 0; index < 20; index++)
+            if (index != page && inside(x, y, index < 10 ? 557 : 602, 80 + 49 * (index % 10), 40, 40)) return hover ? 102 : 100;
+        for (int index = 0; index < SIDEBAR_Y.length; index++)
+            if (index != (saving ? 4 : 5) && inside(x, y, 656, SIDEBAR_Y[index], 144, 25)) return hover ? 101 : 100;
+        return -1;
+    }
 
     private void image(Canvas canvas, String name, int sequence, float x, float y) {
         canvas.drawBitmap(assets.bitmap(name, sequence), x, y, paint);

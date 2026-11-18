@@ -7,6 +7,7 @@ param(
     [string]$JavaHome = '',
     [string]$BundleDirectory = '',
     [string]$IconExecutable = '',
+    [ValidateRange(0,65535)][int]$IconResourceId = 0,
     [string]$OutputDirectory = '',
     [string]$ApkOutputDirectory = '',
     [string]$CargoTargetDirectory = '',
@@ -61,6 +62,10 @@ if ($CheckTools) {
 if ($bundled -and $bundle.id -ceq 'dousei-cn' -and [string]::IsNullOrWhiteSpace($IconExecutable)) {
     throw 'The Dousei APK requires -IconExecutable pointing to the original game EXE.'
 }
+if ($bundled -and $bundle.id -ceq 'dousei-cn' -and $IconResourceId -eq 0) {
+    # This game's large icon differs from its PC window icon; retain the window artwork.
+    $IconResourceId = 5
+}
 $signingDirectory = Join-Path $project 'bin'
 $delivery = if ([string]::IsNullOrWhiteSpace($ApkOutputDirectory)) { $signingDirectory }
     else { [IO.Path]::GetFullPath($ApkOutputDirectory, $project) }
@@ -84,7 +89,9 @@ $resourceArguments = @($resourceZip)
 if (-not [string]::IsNullOrWhiteSpace($IconExecutable)) {
     $IconExecutable = (Resolve-Path -LiteralPath $IconExecutable).Path
     $iconResources = Join-Path $output 'icon-res'
-    Invoke-Checked 'python' @("$PSScriptRoot/extract-icon.py", $IconExecutable, $iconResources)
+    $iconArguments = @("$PSScriptRoot/extract-icon.py", $IconExecutable, $iconResources)
+    if ($IconResourceId -gt 0) { $iconArguments += @('--resource-id', [string]$IconResourceId) }
+    Invoke-Checked 'python' $iconArguments
     $iconZip = Join-Path $output 'compiled-icon.zip'
     Invoke-Checked "$BuildTools/aapt2.exe" @('compile', '--dir', $iconResources, '-o', $iconZip)
     $resourceArguments += $iconZip

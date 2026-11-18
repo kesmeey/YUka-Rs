@@ -6,31 +6,25 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.RectF;
+import java.util.HashMap;
+import java.util.Map;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-/** Gallery and soundtrack browser for the FD catalogue. */
+/** The FD CG_main, cg_mode, create_Type and create_display sprite layouts. */
 final class DouseiExtrasMenu implements ExtrasMenu {
-    private enum Section { IMAGES, SCENES, MUSIC }
-
-    private static final int BACKGROUND = 0xff101c2c;
-    private static final int SIDEBAR = 0xff17283e;
-    private static final int TILE = 0xff203650;
-    private static final int SELECTED = 0xff326d9f;
-    private static final int MUTED = 0xffa5b8ce;
-    private static final String[] MODES = {"A", "B", "C"};
-
     private final Listener listener;
     private final JSONArray pages;
-    private final Bitmap[][] thumbnails;
     private final int tracks;
-    private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-    private final RectF destination = new RectF();
-    private Section section = Section.IMAGES;
+    private final Map<String, Bitmap> artwork = new HashMap<>();
+    private final Map<String, Bitmap> thumbnails = new HashMap<>();
+    private final Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
     private int character;
     private int style;
     private int track;
-    private boolean musicPlaying;
+    // CG_main's ambient BGM starts before the music browser has a selected track.
+    private int selectedTrack;
+    private boolean musicPlaying = true;
     private JSONObject currentImage;
     private int frame;
     private Bitmap picture;
@@ -40,20 +34,37 @@ final class DouseiExtrasMenu implements ExtrasMenu {
         pages = catalogue.optJSONArray("pages");
         tracks = catalogue.optInt("music_tracks");
         track = catalogue.optInt("default_track");
-        if (pages == null || pages.length() == 0 || tracks < 1 || track < 1 || track > tracks)
-            throw new IllegalArgumentException("无效的鉴赏目录");
-        thumbnails = new Bitmap[pages.length()][25];
-        musicPlaying = true;
+        if (pages == null || pages.length() != 5 || tracks != 32 || track < 1 || track > tracks)
+            throw new IllegalArgumentException("Invalid FD extras catalogue");
     }
 
-    /** Read the unlocked thumbnails on the engine thread before showing the menu. */
+    /** Only UI planes and 100 x 75 thumbnails are retained, never the full CG catalogue. */
     static DouseiExtrasMenu load(long session, JSONObject catalogue, Listener listener) {
         DouseiExtrasMenu menu = new DouseiExtrasMenu(catalogue, listener);
         try {
-            for (int character = 0; character < menu.pages.length(); character++) {
-                JSONObject page = menu.pages.optJSONObject(character);
-                menu.loadThumbnails(session, character, page.optJSONArray("images"), 0);
-                menu.loadThumbnails(session, character, page.optJSONArray("scenes"), 19);
+            for (int index = 1; index <= 5; index++) menu.loadArt(session, "cg_base0" + index, 0);
+            menu.loadArt(session, "page_btn", 10);
+            menu.loadArt(session, "to_title", 10);
+            menu.loadArt(session, "Type", 6);
+            menu.loadArt(session, "bgm_no", 64);
+            menu.loadArt(session, "bgm_name", 32);
+            menu.loadArt(session, "bgm_ctrl", 8);
+            menu.loadArt(session, "bgm_win", 1);
+            menu.loadArt(session, "NoData", 1);
+            for (int group = 0; group < menu.pages.length(); group++) {
+                JSONObject page = menu.pages.optJSONObject(group);
+                for (String kind : new String[]{"images", "scenes"}) {
+                    JSONArray entries = page.optJSONArray(kind);
+                    if (entries == null) throw new IllegalArgumentException("Missing FD extras entries");
+                    for (int index = 0; index < entries.length(); index++) {
+                        JSONObject entry = entries.optJSONObject(index);
+                        int id = entry.optInt("id") + (kind.equals("scenes") ? 19 : 0);
+                        menu.thumbnails.put(group + ":" + id, OriginalAssets.decode(
+                            NativeBridge.extrasImage(session, group, id, -1)));
+                        if (entry.optBoolean("unlocked")) menu.thumbnails.put(group + ":" + id + ":hover", OriginalAssets.decode(
+                            NativeBridge.extrasImage(session, group, id, -2)));
+                    }
+                }
             }
             return menu;
         } catch (RuntimeException | Error failure) {
@@ -62,142 +73,120 @@ final class DouseiExtrasMenu implements ExtrasMenu {
         }
     }
 
-    private void loadThumbnails(long session, int group, JSONArray entries, int offset) {
-        if (entries == null) throw new IllegalArgumentException("鉴赏项目缺失");
-        for (int index = 0; index < entries.length(); index++) {
-            JSONObject entry = entries.optJSONObject(index);
-            int id = entry.optInt("id") + offset;
-            if (id < 1 || id >= thumbnails[group].length) throw new IllegalArgumentException("无效的鉴赏项目编号");
-            if (entry.optBoolean("unlocked")) {
-                thumbnails[group][id] = OriginalAssets.decode(NativeBridge.extrasImage(session, group, id, -1));
-            }
-        }
+    private void loadArt(long session, String name, int sequences) {
+        if (sequences == 0) putArt(session, name, -1);
+        for (int sequence = 0; sequence < sequences; sequence++) putArt(session, name, sequence);
+    }
+
+    private void putArt(long session, String name, int sequence) {
+        Bitmap image = OriginalAssets.decode(NativeBridge.image(session, "ykg\\extra\\" + name + ".ykg", sequence));
+        if (image == null) throw new IllegalArgumentException("Missing FD extras artwork " + name);
+        artwork.put(name + ":" + sequence, image);
     }
 
     @Override public void draw(Canvas canvas, float pressedX, float pressedY) {
-        fill(canvas, 0, 0, 800, 600, BACKGROUND);
         if (currentImage != null) {
-            drawPreview(canvas);
+            canvas.drawColor(Color.BLACK);
+            if (picture != null) canvas.drawBitmap(picture, null, new RectF(0, 0, 800, 600), paint);
             return;
         }
-        fill(canvas, 0, 0, 186, 600, SIDEBAR);
-        label(canvas, "鉴赏", 24, 49, 31, Color.WHITE);
-        String[] names = {"CG 鉴赏", "剧情回想", "音乐鉴赏"};
-        for (Section candidate : Section.values()) {
-            int index = candidate.ordinal();
-            button(canvas, names[index], 19, 85 + index * 52, 147, 44, candidate == section);
-        }
-        button(canvas, "返回标题", 19, 536, 147, 43, false);
-        if (section == Section.MUSIC) drawTracks(canvas);
-        else drawGallery(canvas, pressedX, pressedY);
-    }
-
-    private void drawGallery(Canvas canvas, float pressedX, float pressedY) {
+        sprite(canvas, "cg_base0" + (character + 1), -1, 0, 0);
         for (int index = 0; index < pages.length(); index++) {
-            button(canvas, pages.optJSONObject(index).optString("name"),
-                201 + 116 * index, 23, 109, 44, character == index);
+            if (index == character) continue;
+            int x = 48 + 115 * index;
+            sprite(canvas, "page_btn", index + (hit(pressedX, pressedY, x, 21, 110, 32) ? 5 : 0), x, 21);
         }
-        label(canvas, "模式", 208, 108, 18, MUTED);
-        for (int index = 0; index < MODES.length; index++)
-            button(canvas, MODES[index], 263 + 63 * index, 81, 55, 38, style == index);
-        JSONArray entries = entries();
-        for (int index = 0; index < entries.length(); index++) {
-            JSONObject entry = entries.optJSONObject(index);
-            int x = tileX(index), y = tileY(index);
-            boolean unlocked = entry.optBoolean("unlocked");
-            boolean pressed = unlocked && hit(pressedX, pressedY, x, y, 135, 98);
-            fill(canvas, x, y, 135, 98, pressed ? SELECTED : TILE);
-            int id = entry.optInt("id");
-            Bitmap thumbnail = thumbnails[character][id + (section == Section.SCENES ? 19 : 0)];
-            if (thumbnail != null) {
-                fit(canvas, thumbnail, x + 8, y + 6, 119, 64);
-                label(canvas, (section == Section.SCENES ? "回想 " : "CG ") + id,
-                    x + 10, y + 90, 15, Color.WHITE);
-            } else {
-                label(canvas, unlocked ? "打开" : "未解锁", x + 25, y + 57, 17, MUTED);
+        sprite(canvas, "to_title", character + (hit(pressedX, pressedY, 0, 524, 120, 60) ? 5 : 0), 0, 524);
+        for (int mode = 0; mode < 3; mode++) {
+            int x = 421 + 104 * mode;
+            boolean selected = style == mode || hit(pressedX, pressedY, x, 299, 100, 24);
+            sprite(canvas, "Type", mode + (selected ? 3 : 0), x, 299);
+        }
+        // Empty native slots are also sprites, including characters with fewer than 15 CGs.
+        for (int index = 0; index < 15; index++)
+            sprite(canvas, "NoData", 0, 65 + index % 6 * 114, 84 + index / 6 * 89);
+        for (int index = 0; index < 4; index++) sprite(canvas, "NoData", 0, 293 + 114 * index, 351);
+        JSONObject page = pages.optJSONObject(character);
+        for (String kind : new String[]{"images", "scenes"}) {
+            JSONArray entries = page.optJSONArray(kind);
+            for (int index = 0; index < entries.length(); index++) {
+                JSONObject entry = entries.optJSONObject(index);
+                int id = entry.optInt("id") + (kind.equals("scenes") ? 19 : 0);
+                boolean hovered = entry.optBoolean("unlocked")
+                    && hit(pressedX, pressedY, entry.optInt("x"), entry.optInt("y"), 100, 75);
+                Bitmap thumbnail = thumbnails.get(character + ":" + id + (hovered ? ":hover" : ""));
+                if (thumbnail != null) canvas.drawBitmap(thumbnail, entry.optInt("x"), entry.optInt("y"), paint);
             }
         }
-    }
-
-    private void drawTracks(Canvas canvas) {
-        label(canvas, musicPlaying ? "正在播放 · 曲目 " + track : "当前曲目 " + track,
-            207, 59, 24, Color.WHITE);
+        sprite(canvas, "bgm_win", 0, 301, 556);
+        if (selectedTrack != 0) sprite(canvas, "bgm_name", selectedTrack - 1, 301, 556);
         for (int index = 0; index < tracks; index++) {
-            button(canvas, Integer.toString(index + 1), 207 + (index % 8) * 72,
-                94 + (index / 8) * 59, 63, 51, track == index + 1);
+            int x = 151 + 30 * (index < 20 ? index : index - 20), y = index < 20 ? 492 : 522;
+            boolean selected = selectedTrack == index + 1 || hit(pressedX, pressedY, x, y, 28, 28);
+            sprite(canvas, "bgm_no", index + (selected ? 32 : 0), x, y);
         }
-        button(canvas, "上一首", 207, 384, 124, 51, false);
-        button(canvas, "播放", 349, 384, 124, 51, musicPlaying);
-        button(canvas, "停止", 491, 384, 124, 51, !musicPlaying);
-        button(canvas, "下一首", 633, 384, 124, 51, false);
+        for (int control = 0; control < 4; control++) {
+            int x = 511 + control * 60;
+            boolean selected = hit(pressedX, pressedY, x, 522, 58, 28)
+                || control == (selectedTrack != 0 && musicPlaying ? 0 : 1);
+            sprite(canvas, "bgm_ctrl", control + (selected ? 4 : 0), x, 522);
+        }
     }
 
-    private void drawPreview(Canvas canvas) {
-        if (picture != null) fit(canvas, picture, 0, 0, 800, 548);
-        else label(canvas, "正在读取图像…", 324, 288, 22, Color.WHITE);
-        button(canvas, "上一张", 22, 553, 126, 39, false);
-        label(canvas, (frame + 1) + " / " + frameCount(), 178, 580, 20, Color.WHITE);
-        button(canvas, "下一张", 510, 553, 121, 39, false);
-        button(canvas, "返回鉴赏", 645, 553, 133, 39, false);
+    @Override public int soundSlot(float x, float y, boolean hover) {
+        // cg_cancel uses a silent full-screen next-image click.
+        if (currentImage != null) return -1;
+        for (int index = 0; index < pages.length(); index++)
+            if (index != character && hit(x, y, 48 + 115 * index, 21, 110, 32)) return hover ? 102 : 100;
+        if (hit(x, y, 0, 524, 120, 60)) return hover ? 101 : 100;
+        for (int mode = 0; mode < 3; mode++)
+            if (mode != style && hit(x, y, 421 + 104 * mode, 299, 100, 24)) return hover ? -1 : 100;
+        JSONObject page = pages.optJSONObject(character);
+        JSONArray scenes = page.optJSONArray("scenes");
+        for (int index = 0; index < scenes.length(); index++) {
+            JSONObject entry = scenes.optJSONObject(index);
+            if (entry.optBoolean("unlocked") && hit(x, y, entry.optInt("x"), entry.optInt("y"), 100, 75))
+                return hover ? -1 : 100;
+        }
+        // CG thumbnails, music numbers and all four music controls have no SE in CG_main.
+        return -1;
     }
 
     @Override public void tap(float x, float y) {
         if (currentImage != null) {
-            if (hit(x, y, 645, 553, 133, 39)) back();
-            else if (hit(x, y, 22, 553, 126, 39) && frame > 0) requestFrame(frame - 1);
-            else if (hit(x, y, 510, 553, 121, 39) && frame + 1 < frameCount()) requestFrame(frame + 1);
+            if (frame + 1 < frameCount()) requestFrame(frame + 1);
+            else back();
             return;
         }
-        if (hit(x, y, 19, 536, 147, 43)) { listener.close(); return; }
-        for (Section candidate : Section.values()) {
-            if (hit(x, y, 19, 85 + candidate.ordinal() * 52, 147, 44)) { section = candidate; return; }
-        }
-        if (section == Section.MUSIC) tapTracks(x, y);
-        else tapGallery(x, y);
-    }
-
-    private void tapTracks(float x, float y) {
-        for (int index = 0; index < tracks; index++) {
-            if (hit(x, y, 207 + (index % 8) * 72, 94 + (index / 8) * 59, 63, 51)) {
-                play(index + 1);
+        for (int index = 0; index < pages.length(); index++)
+            if (hit(x, y, 48 + 115 * index, 21, 110, 32)) { character = index; return; }
+        if (hit(x, y, 0, 524, 120, 60)) { listener.close(); return; }
+        for (int mode = 0; mode < 3; mode++)
+            if (hit(x, y, 421 + 104 * mode, 299, 100, 24)) { style = mode; return; }
+        JSONObject page = pages.optJSONObject(character);
+        for (String kind : new String[]{"images", "scenes"}) {
+            JSONArray entries = page.optJSONArray(kind);
+            for (int index = 0; index < entries.length(); index++) {
+                JSONObject entry = entries.optJSONObject(index);
+                if (!entry.optBoolean("unlocked") || !hit(x, y, entry.optInt("x"), entry.optInt("y"), 100, 75)) continue;
+                if (kind.equals("scenes")) listener.replay(character, entry.optInt("id"), style);
+                else if (entry.optJSONArray("variants").optInt(style) > 0) { currentImage = entry; requestFrame(0); }
                 return;
             }
         }
-        if (hit(x, y, 207, 384, 124, 51)) play(track == 1 ? tracks : track - 1);
-        else if (hit(x, y, 349, 384, 124, 51)) play(track);
-        else if (hit(x, y, 491, 384, 124, 51)) { musicPlaying = false; listener.music(0); }
-        else if (hit(x, y, 633, 384, 124, 51)) play(track == tracks ? 1 : track + 1);
+        for (int index = 0; index < tracks; index++) {
+            int tx = 151 + 30 * (index < 20 ? index : index - 20), ty = index < 20 ? 492 : 522;
+            if (hit(x, y, tx, ty, 28, 28)) { play(index + 1); return; }
+        }
+        if (hit(x, y, 511, 522, 58, 28)) play(selectedTrack == 0 ? 1 : selectedTrack);
+        else if (hit(x, y, 571, 522, 58, 28)) { musicPlaying = false; listener.music(0); }
+        else if (hit(x, y, 631, 522, 58, 28)) play(selectedTrack <= 1 ? tracks : selectedTrack - 1);
+        else if (hit(x, y, 691, 522, 58, 28)) play(selectedTrack >= tracks ? 1 : selectedTrack + 1);
     }
 
-    private void tapGallery(float x, float y) {
-        for (int index = 0; index < pages.length(); index++) {
-            if (hit(x, y, 201 + 116 * index, 23, 109, 44)) { character = index; return; }
-        }
-        for (int index = 0; index < MODES.length; index++) {
-            if (hit(x, y, 263 + 63 * index, 81, 55, 38)) { style = index; return; }
-        }
-        JSONArray entries = entries();
-        for (int index = 0; index < entries.length(); index++) {
-            JSONObject entry = entries.optJSONObject(index);
-            if (!entry.optBoolean("unlocked") || !hit(x, y, tileX(index), tileY(index), 135, 98)) continue;
-            if (section == Section.SCENES) listener.replay(character, entry.optInt("id"), style);
-            else if (entry.optJSONArray("variants").optInt(style) > 0) {
-                currentImage = entry;
-                requestFrame(0);
-            }
-            return;
-        }
-    }
-
-    private JSONArray entries() {
-        return pages.optJSONObject(character).optJSONArray(section == Section.SCENES ? "scenes" : "images");
-    }
-
-    private void play(int value) { track = value; musicPlaying = true; listener.music(value); }
+    private void play(int value) { track = value; selectedTrack = value; musicPlaying = true; listener.music(value); }
     @Override public int musicTrack() { return musicPlaying ? track : 0; }
     private int frameCount() { return currentImage.optJSONArray("variants").optInt(style); }
-    private static int tileX(int index) { return 204 + (index % 4) * 144; }
-    private static int tileY(int index) { return 136 + (index / 4) * 109; }
 
     private void requestFrame(int value) {
         frame = value;
@@ -223,37 +212,14 @@ final class DouseiExtrasMenu implements ExtrasMenu {
 
     @Override public void release() {
         replacePicture(null);
-        for (Bitmap[] page : thumbnails) {
-            for (int id = 0; id < page.length; id++) {
-                if (page[id] != null) { page[id].recycle(); page[id] = null; }
-            }
-        }
+        for (Bitmap image : artwork.values()) if (image != null) image.recycle();
+        for (Bitmap image : thumbnails.values()) if (image != null) image.recycle();
+        artwork.clear();
+        thumbnails.clear();
     }
 
-    private void fit(Canvas canvas, Bitmap bitmap, int x, int y, int width, int height) {
-        float scale = Math.min((float)width / bitmap.getWidth(), (float)height / bitmap.getHeight());
-        float w = bitmap.getWidth() * scale, h = bitmap.getHeight() * scale;
-        float left = x + (width - w) / 2, top = y + (height - h) / 2;
-        destination.set(left, top, left + w, top + h);
-        paint.setColor(Color.WHITE);
-        canvas.drawBitmap(bitmap, null, destination, paint);
-    }
-
-    private void button(Canvas canvas, String text, int x, int y, int width, int height, boolean selected) {
-        fill(canvas, x, y, width, height, selected ? SELECTED : TILE);
-        paint.setTextSize(16);
-        label(canvas, text, x + (width - paint.measureText(text)) / 2, y + height / 2 + 6, 16, Color.WHITE);
-    }
-
-    private void fill(Canvas canvas, int x, int y, int width, int height, int color) {
-        paint.setColor(color);
-        canvas.drawRect(x, y, x + width, y + height, paint);
-    }
-
-    private void label(Canvas canvas, String text, float x, int baseline, int size, int color) {
-        paint.setColor(color);
-        paint.setTextSize(size);
-        canvas.drawText(text, x, baseline, paint);
+    private void sprite(Canvas canvas, String name, int sequence, int x, int y) {
+        canvas.drawBitmap(artwork.get(name + ":" + sequence), x, y, paint);
     }
 
     private static boolean hit(float x, float y, int left, int top, int width, int height) {

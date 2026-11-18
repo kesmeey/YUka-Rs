@@ -16,7 +16,7 @@ import pefile
 from PIL import Image
 
 
-def extract_icon(executable, output):
+def extract_icon(executable, output, resource_id=None):
     source = executable.read_bytes()
     pe = pefile.PE(data=source, fast_load=True)
     pe.parse_data_directories(
@@ -48,6 +48,8 @@ def extract_icon(executable, output):
             for index in range(count):
                 entry = data[6 + index * 14:20 + index * 14]
                 width, height, _, _, _, depth, size, identifier = struct.unpack("<BBBBHHIH", entry)
+                if resource_id is not None and identifier != resource_id:
+                    continue
                 raw = icons.get((identifier, language.id))
                 if raw is None:
                     raw = next((value for (resource_id, _), value in icons.items()
@@ -62,11 +64,11 @@ def extract_icon(executable, output):
                 if len(raw) != size and not (png and depth == 32 and size == 40 + pixels * 4):
                     raise ValueError("Missing or truncated icon bitmap")
                 ico_entry = entry[:8] + struct.pack("<I", len(raw))
-                candidates.append((pixels, depth, ico_entry, raw, group.id, language.id, dimensions))
+                candidates.append((pixels, depth, ico_entry, raw, group.id, language.id, dimensions, identifier))
     if not candidates:
         raise ValueError("The executable's icon groups are empty")
     # Stable sorting retains the first PE resource/language for equal size/depth.
-    _, _, entry, raw, group, language, dimensions = max(candidates, key=lambda icon: icon[:2])
+    _, _, entry, raw, group, language, dimensions, identifier = max(candidates, key=lambda icon: icon[:2])
     ico = struct.pack("<HHH", 0, 1, 1) + entry + struct.pack("<I", 22) + raw
     with Image.open(BytesIO(ico)) as decoded:
         if decoded.size != dimensions:
@@ -80,6 +82,7 @@ def extract_icon(executable, output):
         "source": executable.name,
         "sourceSha256": hashlib.sha256(source).hexdigest(),
         "group": group,
+        "resourceId": identifier,
         "language": language,
         "width": image.width,
         "height": image.height,
@@ -96,12 +99,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("executable", type=Path)
     parser.add_argument("output", type=Path, help="Build-only Android res directory")
+    parser.add_argument("--resource-id", type=int, help="Select a specific PE icon bitmap resource")
     arguments = parser.parse_args()
     executable = arguments.executable.resolve(strict=True)
     output = arguments.output.resolve()
     if output == executable.parent or executable.parent in output.parents:
         parser.error("Output must be outside the original game directory")
-    extract_icon(executable, output)
+    extract_icon(executable, output, arguments.resource_id)
 
 
 if __name__ == "__main__":
