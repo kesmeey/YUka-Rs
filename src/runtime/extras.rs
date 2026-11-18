@@ -3,6 +3,8 @@ use super::*;
 use std::{cell::RefCell, sync::Arc};
 
 const HEROINES: [&str; 5] = ["Tinatu", "Kaho", "Tugumi", "Nanako", "Satuki"];
+const DOUSEI_HEROINES: [&str; 5] = ["琴宫千夏", "花穗", "姬野继美", "三枝奈奈子", "柳濑彩月"];
+const DOUSEI_ROUTE_ORDER: [usize; 5] = [2, 0, 1, 4, 3];
 const CG_FLAGS: [i32; 5] = [220, 250, 280, 310, 340];
 const SCENE_FLAGS: [i32; 5] = [450, 460, 470, 480, 490];
 const NO_DATA: &str = "ykg\\extra\\NoData.ykg";
@@ -28,6 +30,7 @@ pub struct ExtrasInfo {
     pub enabled: bool,
     pub pages: Vec<ExtraPage>,
     pub music_tracks: usize,
+    pub default_track: usize,
 }
 
 #[derive(Clone)]
@@ -48,6 +51,9 @@ struct CatalogPage {
 
 struct Catalog {
     pages: Vec<CatalogPage>,
+    music: Vec<String>,
+    default_track: usize,
+    dousei: bool,
 }
 
 thread_local! {
@@ -60,6 +66,7 @@ struct Probe {
     sprites: BTreeMap<(i32, i32), (i32, i32, i32)>,
     images: Vec<String>,
     stories: Vec<String>,
+    music: Vec<String>,
 }
 
 fn flag(id: i32) -> Slot {
@@ -127,6 +134,9 @@ fn probe(
                             .sprites
                             .remove(&(int(&arguments, 0)?, int(&arguments, 1)?));
                     }
+                    "SoundLoadStream" if int(&arguments, 0)? == 1 => {
+                        result.music.push(string(&arguments, 1)?.into());
+                    }
                     "ScriptCall" => {
                         let path = string(&arguments, 0)?
                             .replace('/', "\\")
@@ -155,7 +165,7 @@ fn probe(
                     }
                     "DrawStop" | "Transition" | "WindowNameSet" | "HistoryReset"
                     | "GraphicDelete" | "SoundStopALL" | "KeyWaitIcon" | "SubMenuEnableMode"
-                    | "ScriptSkipMode" => {}
+                    | "ScriptSkipMode" | "SoundPlayLoop" => {}
                     _ => {
                         return Err(format!(
                             "extra catalogue @{word_offset}: unsupported host {function}"
@@ -182,6 +192,13 @@ impl Runtime {
             return Ok(catalog);
         }
         let view = self.resources.script("yks\\extra\\view_cg.yks")?;
+        let dousei = !self.resources.contains(PLAY_SCRIPT)
+            && DOUSEI_ROUTES
+                .iter()
+                .all(|route| self.resources.contains(route));
+        let scene_start = if dousei { 22 } else { 20 };
+        let scene_end = if dousei { 25 } else { 24 };
+        let image_end = if dousei { 15 } else { 17 };
         let mut pages = Vec::new();
         for (character, name) in HEROINES.iter().enumerate() {
             let mode = self
@@ -190,7 +207,7 @@ impl Runtime {
             let snapshot = probe(mode, &[], 1)?;
             let mut page = CatalogPage::default();
             for (&(parent, child), &(x, y, slot)) in &snapshot.sprites {
-                if parent != 502 || !(1..=24).contains(&child) {
+                if parent != 502 || !(1..=scene_end).contains(&child) {
                     continue;
                 }
                 let thumbnail = snapshot
@@ -201,17 +218,17 @@ impl Runtime {
                 if thumbnail.eq_ignore_ascii_case(NO_DATA) {
                     continue;
                 }
-                if child <= 17 {
+                if child <= image_end {
                     let mut variants = Vec::new();
-                    for style in 0..4 {
+                    for style in 0..if dousei { 3 } else { 4 } {
                         let mut images = Vec::new();
-                        for selection in 1..=2 {
+                        for selection in 1..=if dousei { 1 } else { 2 } {
                             let result = probe(
                                 view.clone(),
                                 &[
                                     (5000, character as i32),
                                     (5200, child),
-                                    (5510, style & 1),
+                                    (5510, if dousei { style } else { style & 1 }),
                                     (5520, (style >> 1) & 1),
                                 ],
                                 selection,
@@ -232,11 +249,11 @@ impl Runtime {
                         thumbnail,
                         variants,
                     });
-                } else if child >= 20 {
-                    let id = child - 19;
-                    let first = match character {
-                        0 | 4 => 3,
-                        3 => 2,
+                } else if child >= scene_start {
+                    let id = child - scene_start + 1;
+                    let first = match (dousei, character) {
+                        (false, 0 | 4) => 3,
+                        (false, 3) => 2,
                         _ => 1,
                     };
                     page.scenes.push(Item {
@@ -251,7 +268,32 @@ impl Runtime {
             }
             pages.push(page);
         }
-        let catalog = Arc::new(Catalog { pages });
+        let music = if dousei {
+            let script = self.resources.script("yks\\extra\\play_music.yks")?;
+            (1..=32)
+                .map(|track| {
+                    let result = probe(script.clone(), &[(6000, track)], 1)?;
+                    match result.music.as_slice() {
+                        [path] if self.resources.contains(path) => Ok(path.clone()),
+                        _ => Err(format!("FD extras track {track} has no unique source").into()),
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            (1..=29)
+                .map(|track| format!("ogg\\bgm\\lv_bgm{track:02}.ogg"))
+                .collect()
+        };
+        let default_track = music
+            .iter()
+            .position(|path| path.eq_ignore_ascii_case("ogg\\bgm\\lv_bgm22.ogg"))
+            .map_or(1, |index| index + 1);
+        let catalog = Arc::new(Catalog {
+            pages,
+            music,
+            default_track,
+            dousei,
+        });
         CATALOGS.with(|cache| {
             let mut cache = cache.borrow_mut();
             if cache.len() >= 2 {
@@ -280,7 +322,11 @@ impl Runtime {
         let pages = catalog
             .pages
             .iter()
-            .zip(HEROINES)
+            .zip(if catalog.dousei {
+                DOUSEI_HEROINES
+            } else {
+                HEROINES
+            })
             .map(|(page, name)| {
                 let item = |item: &Item| ExtraItem {
                     id: item.id,
@@ -299,11 +345,12 @@ impl Runtime {
         Ok(ExtrasInfo {
             enabled,
             pages,
-            music_tracks: 29,
+            music_tracks: catalog.music.len(),
+            default_track: catalog.default_track,
         })
     }
 
-    /// item=1..17 is a CG; item=20..24 is a scene thumbnail. variant encodes style*10000+frame.
+    /// item=1..17 is a CG; item=20..24 is a scene thumbnail. Variant encodes style*10000+frame.
     pub fn extras_image(
         &mut self,
         character: usize,
@@ -338,9 +385,6 @@ impl Runtime {
     }
 
     pub fn extras_music(&mut self, track: i32) -> Result<()> {
-        if !(0..=29).contains(&track) {
-            return Err("extra music track must be 0..29".into());
-        }
         if self.extra_global(200) == 0 {
             return Err("extras are not unlocked in original progress".into());
         }
@@ -348,8 +392,12 @@ impl Runtime {
             self.sound.stop(1);
             return Ok(());
         }
-        let path = format!("ogg\\bgm\\lv_bgm{track:02}.ogg");
-        self.sound.load(1, &path, self.resources.read(&path)?)?;
+        let catalog = self.extras_catalog()?;
+        let path = usize::try_from(track)
+            .ok()
+            .and_then(|id| catalog.music.get(id.checked_sub(1)?))
+            .ok_or("invalid extra music track")?;
+        self.sound.load(1, path, self.resources.read(path)?)?;
         self.sound.set_streamed(1, true);
         self.sound.play(1, true)?;
         // The gallery freezes the VM but has its own live music player.
@@ -358,10 +406,10 @@ impl Runtime {
     }
 
     pub fn extras_replay(&mut self, character: usize, scene: usize, style: i32) -> Result<()> {
-        if !(0..4).contains(&style) {
+        let catalog = self.extras_catalog()?;
+        if !(0..if catalog.dousei { 3 } else { 4 }).contains(&style) {
             return Err("invalid extra scene style".into());
         }
-        let catalog = self.extras_catalog()?;
         let entry = catalog
             .pages
             .get(character)
@@ -385,14 +433,18 @@ impl Runtime {
         for (id, value) in [
             (5000, character as i32),
             (5210, scene as i32),
-            (5510, style & 1),
+            (5510, if catalog.dousei { style } else { style & 1 }),
             (5520, (style >> 1) & 1),
         ] {
             replacement.stack[0]
                 .vm
                 .set_variable(flag(id), Value::Integer(value))?;
         }
-        replacement.entry = PLAY_SCRIPT.into();
+        replacement.entry = if catalog.dousei {
+            DOUSEI_ROUTES[DOUSEI_ROUTE_ORDER[character]].into()
+        } else {
+            PLAY_SCRIPT.into()
+        };
         replacement.drive()?;
         *self = replacement;
         Ok(())
@@ -402,6 +454,94 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires original FD through YUKA_TEST_DOUSEI"]
+    fn dousei_extras_catalogue_and_replay_follow_progress() -> Result<()> {
+        let game = PathBuf::from(std::env::var("YUKA_TEST_DOUSEI")?);
+        let mut runtime =
+            Runtime::new_unstarted(&game, DOUSEI_ROUTES[0], TextEncoding::Gbk, true, true, 0)?;
+        let catalog = runtime.extras_catalog()?;
+        assert!(catalog.dousei);
+        assert_eq!(catalog.default_track, 23);
+        assert_eq!(catalog.music.len(), 32);
+        assert!(catalog.music[18].ends_with("41.ogg"));
+        assert!(catalog.music[31].ends_with("00.ogg"));
+        assert_eq!(
+            catalog
+                .pages
+                .iter()
+                .map(|page| page.images.len())
+                .collect::<Vec<_>>(),
+            [12, 13, 13, 12, 15]
+        );
+        assert_eq!(
+            catalog
+                .pages
+                .iter()
+                .map(|page| page.scenes.len())
+                .collect::<Vec<_>>(),
+            [4; 5]
+        );
+        for page in &catalog.pages {
+            for image in &page.images {
+                assert_eq!(image.variants.len(), 3);
+                assert!(runtime.resources.contains(&image.thumbnail));
+                for frames in &image.variants {
+                    assert!(!frames.is_empty());
+                    assert!(frames.iter().all(|path| runtime.resources.contains(path)));
+                }
+            }
+            for scene in &page.scenes {
+                assert!(runtime.resources.contains(&scene.thumbnail));
+            }
+        }
+        let info = runtime.extras_info()?;
+        assert!(!info.enabled);
+        assert!(runtime.extras_music(1).is_err());
+        assert!(runtime.extras_image(1, 1, 20000).is_err());
+        assert!(runtime.extras_replay(1, 1, 2).is_err());
+        let scratch =
+            PathBuf::from("evidence/extras-fd-test-io").join(std::process::id().to_string());
+        std::fs::create_dir_all(&scratch)?;
+        runtime.configure_save_directory(scratch);
+        for (id, value) in [(200, 1), (250, 1), (460, 1)] {
+            runtime.set_global_flag(id, value)?;
+        }
+        let info = runtime.extras_info()?;
+        assert!(
+            info.enabled && info.pages[1].images[0].unlocked && info.pages[1].scenes[0].unlocked
+        );
+        assert!(!info.pages[1].images[1].unlocked && !info.pages[1].scenes[1].unlocked);
+        assert!(runtime.extras_image(1, 2, 0).is_err());
+        assert!(runtime.extras_replay(1, 2, 0).is_err());
+        assert_eq!(runtime.extras_image(1, 1, 20000)?.dimensions(), (800, 600));
+        runtime.extras_music(32)?;
+        assert!(
+            runtime
+                .sound
+                .snapshot()
+                .iter()
+                .any(|(slot, state)| *slot == 1 && state.path.ends_with("00.ogg"))
+        );
+        assert!(runtime.extras_music(33).is_err());
+        runtime.extras_replay(1, 1, 2)?;
+        for _ in 0..3000 {
+            if runtime.scene.finished {
+                break;
+            }
+            if matches!(runtime.waiting, Waiting::Choice) {
+                runtime.choose(0)?;
+            } else {
+                runtime.advance()?;
+            }
+        }
+        assert!(runtime.scene.finished);
+        assert_eq!(runtime.end_reason.as_deref(), Some("return_to_extras"));
+        assert_eq!(runtime.entry, DOUSEI_ROUTES[0]);
+        assert!(runtime.pages > 10);
+        Ok(())
+    }
 
     #[test]
     #[ignore = "requires original game through YUKA_TEST_GAME"]

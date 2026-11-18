@@ -52,16 +52,25 @@ def extract_icon(executable, output):
                 if raw is None:
                     raw = next((value for (resource_id, _), value in icons.items()
                                 if resource_id == identifier), None)
-                if raw is None or len(raw) != size:
+                if raw is None:
                     raise ValueError("Missing or truncated icon bitmap")
-                candidates.append(((width or 256) * (height or 256), depth,
-                                   entry[:12], raw, group.id, language.id))
+                dimensions = (width or 256, height or 256)
+                pixels = dimensions[0] * dimensions[1]
+                # Some PE icon groups retain a 32-bit DIB size after replacing
+                # the resource with a PNG. The PE record supplies its real size.
+                png = raw.startswith(b"\x89PNG\r\n\x1a\n")
+                if len(raw) != size and not (png and depth == 32 and size == 40 + pixels * 4):
+                    raise ValueError("Missing or truncated icon bitmap")
+                ico_entry = entry[:8] + struct.pack("<I", len(raw))
+                candidates.append((pixels, depth, ico_entry, raw, group.id, language.id, dimensions))
     if not candidates:
         raise ValueError("The executable's icon groups are empty")
     # Stable sorting retains the first PE resource/language for equal size/depth.
-    _, _, entry, raw, group, language = max(candidates, key=lambda icon: icon[:2])
+    _, _, entry, raw, group, language, dimensions = max(candidates, key=lambda icon: icon[:2])
     ico = struct.pack("<HHH", 0, 1, 1) + entry + struct.pack("<I", 22) + raw
     with Image.open(BytesIO(ico)) as decoded:
+        if decoded.size != dimensions:
+            raise ValueError("Icon dimensions do not match the PE icon group")
         image = decoded.convert("RGBA")
     output.mkdir(parents=True, exist_ok=True)
     destination = output / "drawable-nodpi" / "ic_game_icon.png"

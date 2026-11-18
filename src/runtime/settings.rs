@@ -40,6 +40,36 @@ pub(super) const OPTION_DEFAULTS: &[(i32, i32)] = &[
     (121, 1000),
 ];
 
+const DOUSEI_VOICE_DEFAULTS: &[(i32, i32)] = &[(122, 1000), (123, 1000), (124, 1000)];
+
+pub(super) fn option_defaults(dousei: bool) -> impl Iterator<Item = (i32, i32)> {
+    let extra = if dousei { DOUSEI_VOICE_DEFAULTS } else { &[] };
+    OPTION_DEFAULTS.iter().chain(extra).copied()
+}
+
+#[cfg(any(target_os = "android", test))]
+const DOUSEI_SETTINGS_SAMPLES: [(&str, i32); 19] = [
+    ("ogg/voice/Tinatu/tinatu_03_ti_104.ogg", 102),
+    ("ogg/voice/kaho/kaho_08_ka_004.ogg", 103),
+    ("ogg/voice/Tentyou/tinatu_04_tn_001.ogg", 104),
+    ("ogg/voice/Tinatu/tinatu_06_ti_097.ogg", 110),
+    ("ogg/voice/kaho/kaho_08_ka_028.ogg", 111),
+    ("ogg/voice/Tugumi/tugumi_03_tu_001.ogg", 112),
+    ("ogg/voice/Nanako/nanako_02_na_017.ogg", 113),
+    ("ogg/voice/Satuki/satuki_06_sa_053.ogg", 114),
+    ("ogg/voice/Huyumi/tinatu_11_hu_001.ogg", 115),
+    ("ogg/voice/Nao/tugumi_07_no_002.ogg", 116),
+    ("ogg/voice/Kiina/satuki_03_ki_001.ogg", 117),
+    ("ogg/voice/extra_W/tugumi_01_w26_019.ogg", 120),
+    ("ogg/voice/Tentyou/tugumi_01_tn_005.ogg", 118),
+    ("ogg/voice/Ryuusei/satuki_03_ry_006.ogg", 119),
+    ("ogg/voice/extra_M/tinatu_07_m12_009.ogg", 121),
+    ("ogg/voice/Siori/satuki_06_si_052.ogg", 122),
+    ("ogg/voice/Mai/tugumi_03_ma_016.ogg", 123),
+    ("ogg/voice/Ituki/satuki_02_it_037.ogg", 124),
+    ("ogg/system/click1.ogg", 101),
+];
+
 fn global_slot(id: i32) -> Slot {
     Slot::IntegerVariable {
         bank: "GlobalFlag".into(),
@@ -47,7 +77,7 @@ fn global_slot(id: i32) -> Slot {
     }
 }
 
-fn validate(id: i32, value: i32) -> Result<()> {
+fn validate(id: i32, value: i32, dousei: bool) -> Result<()> {
     let valid = match id {
         2 | 3 | 11 | 12 | 13 | 16 | 19 => (0..=1).contains(&value),
         10 | 14 | 15 => (0..=2).contains(&value),
@@ -55,6 +85,7 @@ fn validate(id: i32, value: i32) -> Result<()> {
         5 => (0..=6600).contains(&value),
         30..=35 => (0..=255).contains(&value),
         100..=104 | 110..=121 => (0..=1000).contains(&value),
+        122..=124 => dousei && (0..=1000).contains(&value),
         _ => false,
     };
     if valid {
@@ -127,13 +158,8 @@ impl Runtime {
         // Start.yks SETUP_FORMAT runs OptionDefault only when GlobalFlag60 is zero.
         // This also initializes old yuka-rs saves that never ran native setup.
         if self.global_flag(60) == 0 {
-            for &(id, value) in OPTION_DEFAULTS {
+            for (id, value) in option_defaults(self.sound.is_voice_slot(25)) {
                 self.set_global_flag(id, value)?;
-            }
-            if self.sound.is_voice_slot(25) {
-                for id in 122..=124 {
-                    self.set_global_flag(id, 1000)?;
-                }
             }
             self.set_global_flag(60, 1)?;
         }
@@ -142,9 +168,8 @@ impl Runtime {
     }
 
     pub fn settings(&self) -> Settings {
-        let flags = OPTION_DEFAULTS
-            .iter()
-            .map(|&(id, _)| (id, self.global_flag(id)))
+        let flags = option_defaults(self.sound.is_voice_slot(25))
+            .map(|(id, _)| (id, self.global_flag(id)))
             .collect();
         let rgb =
             |base| [0, 1, 2].map(|offset| self.global_flag(base + offset).clamp(0, 255) as u8);
@@ -169,8 +194,9 @@ impl Runtime {
     }
 
     pub fn update_settings(&mut self, patch: BTreeMap<i32, i32>) -> Result<()> {
+        let dousei = self.sound.is_voice_slot(25);
         for (&id, &value) in &patch {
-            validate(id, value)?;
+            validate(id, value, dousei)?;
         }
         let mut expanded = patch.clone();
         // The original aggregate sliders assign their children's stored volumes;
@@ -187,7 +213,7 @@ impl Runtime {
             for child in children {
                 expanded.insert(*child, value);
             }
-            if self.sound.is_voice_slot(25) {
+            if dousei {
                 let dousei_children: &[i32] = match id {
                     102 => &[122, 123, 124],
                     103 => &[122, 123],
@@ -214,12 +240,10 @@ impl Runtime {
             "screen" | "1" => matches!(id, 10 | 11 | 15),
             "text" | "2" => matches!(id, 2..=5 | 12..=14 | 16 | 30..=35),
             "sound" | "3" => matches!(id, 19 | 100 | 101),
-            "voice" | "4" => matches!(id, 102..=104 | 110..=121),
+            "voice" | "4" => matches!(id, 102..=104 | 110..=124),
             _ => false,
         };
-        let patch = OPTION_DEFAULTS
-            .iter()
-            .copied()
+        let patch = option_defaults(self.sound.is_voice_slot(25))
             .filter(|&(id, _)| included(id))
             .collect::<BTreeMap<_, _>>();
         if patch.is_empty() {
@@ -260,9 +284,15 @@ impl Runtime {
             ("ryuusei", 119),
             ("extra_w", 120),
             ("extra_m", 121),
+            ("siori", 122),
+            ("mai", 123),
+            ("ituki", 124),
         ]
         .into_iter()
-        .find(|(name, _)| path.contains(&format!("/voice/{name}/")))
+        .find(|(name, id)| {
+            (*id <= 121 || self.sound.is_voice_slot(25))
+                && path.contains(&format!("/voice/{name}/"))
+        })
         .map_or(102, |(_, id)| id);
         self.global_flag(bank).clamp(0, 1000) as f32 / 1000.0
     }
@@ -378,24 +408,31 @@ impl Runtime {
         index: i32,
         directory: &Path,
     ) -> Result<serde_json::Value> {
-        let (path, flag) = match index {
-            0 => ("ogg\\system\\TI_LOVE.ogg", 102),
-            1 => ("ogg\\voice\\Kaho\\CHAPTER3-3_KA_025.ogg", 103),
-            2 => ("ogg\\voice\\Tentyou\\CHAPTER2-1_TN_001.ogg", 104),
-            3 => ("ogg\\voice\\Tinatu\\CHAPTER4-3_TI_001.ogg", 110),
-            4 => ("ogg\\voice\\Kaho\\PROLOGUE1_KA_032.ogg", 111),
-            5 => ("ogg\\voice\\Tugumi\\TUGUMI_07_TU_039.ogg", 112),
-            6 => ("ogg\\voice\\Nanako\\NANAKO_05_NA_012.ogg", 113),
-            7 => ("ogg\\voice\\Satuki\\CHAPTER4-1_SA_025.ogg", 114),
-            8 => ("ogg\\voice\\Huyumi\\KAHO_02_HU_001.ogg", 115),
-            9 => ("ogg\\voice\\Nao\\CHAPTER1-3_NO_003.ogg", 116),
-            10 => ("ogg\\voice\\Kiina\\KAHO_05_KI_012.ogg", 117),
-            11 => ("ogg\\voice\\extra_W\\KAHO_04_W08_005.ogg", 120),
-            12 => ("ogg\\voice\\Tentyou\\CHAPTER5-2_TN_006.ogg", 118),
-            13 => ("ogg\\voice\\Ryuusei\\CHAPTER1-3_RY_002.ogg", 119),
-            14 => ("ogg\\voice\\extra_M\\CHAPTER2-1_M22_006.ogg", 121),
-            15 => ("ogg\\system\\click1.ogg", 101),
-            _ => return Err("unsupported settings sample".into()),
+        let (path, flag) = if self.sound.is_voice_slot(25) {
+            let index = usize::try_from(index)?;
+            *DOUSEI_SETTINGS_SAMPLES
+                .get(index)
+                .ok_or("unsupported FD settings sample")?
+        } else {
+            match index {
+                0 => ("ogg\\system\\TI_LOVE.ogg", 102),
+                1 => ("ogg\\voice\\Kaho\\CHAPTER3-3_KA_025.ogg", 103),
+                2 => ("ogg\\voice\\Tentyou\\CHAPTER2-1_TN_001.ogg", 104),
+                3 => ("ogg\\voice\\Tinatu\\CHAPTER4-3_TI_001.ogg", 110),
+                4 => ("ogg\\voice\\Kaho\\PROLOGUE1_KA_032.ogg", 111),
+                5 => ("ogg\\voice\\Tugumi\\TUGUMI_07_TU_039.ogg", 112),
+                6 => ("ogg\\voice\\Nanako\\NANAKO_05_NA_012.ogg", 113),
+                7 => ("ogg\\voice\\Satuki\\CHAPTER4-1_SA_025.ogg", 114),
+                8 => ("ogg\\voice\\Huyumi\\KAHO_02_HU_001.ogg", 115),
+                9 => ("ogg\\voice\\Nao\\CHAPTER1-3_NO_003.ogg", 116),
+                10 => ("ogg\\voice\\Kiina\\KAHO_05_KI_012.ogg", 117),
+                11 => ("ogg\\voice\\extra_W\\KAHO_04_W08_005.ogg", 120),
+                12 => ("ogg\\voice\\Tentyou\\CHAPTER5-2_TN_006.ogg", 118),
+                13 => ("ogg\\voice\\Ryuusei\\CHAPTER1-3_RY_002.ogg", 119),
+                14 => ("ogg\\voice\\extra_M\\CHAPTER2-1_M22_006.ogg", 121),
+                15 => ("ogg\\system\\click1.ogg", 101),
+                _ => return Err("unsupported settings sample".into()),
+            }
         };
         let bytes = self.resources.read(path)?;
         if !bytes.starts_with(b"OggS") {
@@ -416,7 +453,7 @@ mod tests {
     #[test]
     fn setting_ranges_reject_unknown_flags_and_bad_values() {
         for &(id, value) in OPTION_DEFAULTS {
-            assert!(validate(id, value).is_ok());
+            assert!(validate(id, value, false).is_ok());
         }
         for (id, value) in [
             (4, -1),
@@ -429,8 +466,50 @@ mod tests {
             (9998, 1),
             (-1, 1),
         ] {
-            assert!(validate(id, value).is_err());
+            assert!(validate(id, value, false).is_err());
         }
+        for &(id, value) in DOUSEI_VOICE_DEFAULTS {
+            assert!(validate(id, value, false).is_err());
+            assert!(validate(id, value, true).is_ok());
+            assert!(validate(id, 1001, true).is_err());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the original FD through YUKA_TEST_DOUSEI"]
+    fn dousei_settings_keep_fd_voice_gains_and_use_present_preview_samples() -> Result<()> {
+        let game = PathBuf::from(std::env::var("YUKA_TEST_DOUSEI")?);
+        let output = PathBuf::from("evidence/dousei-settings-test").join(format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos(),
+        ));
+        let fresh =
+            || Runtime::new_unstarted(&game, DOUSEI_ROUTES[0], TextEncoding::Gbk, true, true, 0);
+        let mut runtime = fresh()?;
+        runtime.configure_save_directory(output.clone());
+        assert_eq!(runtime.settings().flags.get(&124), Some(&1000));
+        runtime.update_settings([(102, 395), (103, 550), (122, 72)].into())?;
+        assert_eq!(runtime.settings().flags.get(&122), Some(&72));
+        assert_eq!(runtime.settings().flags.get(&123), Some(&550));
+        assert_eq!(runtime.settings().flags.get(&124), Some(&395));
+
+        let mut reloaded = fresh()?;
+        reloaded.configure_save_directory(output);
+        reloaded.load_native_globals()?;
+        assert_eq!(reloaded.settings().flags, runtime.settings().flags);
+        assert_eq!(
+            reloaded.history_voice_volume("ogg/voice/Ituki/satuki_02_it_037.ogg"),
+            0.395
+        );
+        reloaded.reset_settings("voice")?;
+        assert_eq!(reloaded.settings().flags.get(&124), Some(&1000));
+        for (path, _) in DOUSEI_SETTINGS_SAMPLES {
+            assert!(runtime.resources.read(path)?.starts_with(b"OggS"), "{path}");
+        }
+        Ok(())
     }
 
     #[test]

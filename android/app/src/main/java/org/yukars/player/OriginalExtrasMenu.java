@@ -12,13 +12,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 /** CG_main/create_Type/create_display layouts with the original progress gates. */
-final class OriginalExtrasMenu {
-    interface Listener {
-        void close();
-        void image(int character, int item, int variant);
-        void replay(int character, int scene, int style);
-        void music(int track);
-    }
+final class OriginalExtrasMenu implements ExtrasMenu {
     private final Listener listener;
     private final JSONArray pages;
     private final Map<String, Bitmap> artwork = new HashMap<>();
@@ -71,7 +65,7 @@ final class OriginalExtrasMenu {
             OriginalAssets.decode(NativeBridge.image(session, "ykg\\extra\\" + name + ".ykg", index)));
     }
 
-    void draw(Canvas canvas, float pressedX, float pressedY) {
+    @Override public void draw(Canvas canvas, float pressedX, float pressedY) {
         if (currentImage != null) {
             canvas.drawColor(Color.BLACK);
             if (picture != null) canvas.drawBitmap(picture, null, new RectF(0, 0, 800, 600), paint);
@@ -118,7 +112,7 @@ final class OriginalExtrasMenu {
         image(canvas, "bgm_ctrl", 3, 691, 522);
     }
 
-    void tap(float x, float y) {
+    @Override public void tap(float x, float y) {
         if (currentImage != null) {
             if (x >= 650 && y >= 550) back();
             else if (x < 200) requestFrame(Math.max(0, frame - 1));
@@ -153,24 +147,24 @@ final class OriginalExtrasMenu {
     }
 
     private void play(int value) { track = value; musicPlaying = true; listener.music(track); }
-    int musicTrack() { return musicPlaying ? track : 0; }
+    @Override public int musicTrack() { return musicPlaying ? track : 0; }
     private int frameCount() { return currentImage == null ? 0 : currentImage.optJSONArray("variants").optInt(style); }
     private void requestFrame(int value) {
         frame = value;
         if (picture != null) { picture.recycle(); picture = null; }
         listener.image(character, currentImage.optInt("id"), style * 10000 + frame);
     }
-    void showImage(Bitmap image, int selectedCharacter, int item, int variant) {
+    @Override public void showImage(Bitmap image, int selectedCharacter, int item, int variant) {
         if (currentImage != null && character == selectedCharacter && currentImage.optInt("id") == item && variant == style * 10000 + frame)
             { if (picture != null) picture.recycle(); picture = image; }
         else if (image != null) image.recycle();
     }
-    void back() {
+    @Override public void back() {
         if (currentImage == null) { listener.close(); return; }
         currentImage = null;
         if (picture != null) { picture.recycle(); picture = null; }
     }
-    void release() {
+    @Override public void release() {
         if (picture != null) { picture.recycle(); picture = null; }
         for (Bitmap image : artwork.values()) if (image != null) image.recycle();
         for (Bitmap image : thumbnails.values()) if (image != null) image.recycle();

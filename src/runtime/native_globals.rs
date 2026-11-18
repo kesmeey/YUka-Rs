@@ -103,7 +103,8 @@ impl Runtime {
             .map(|bytes| AlreadyDat::parse(&bytes))
             .transpose()?
             .unwrap_or_else(|| self.native_globals.already.clone());
-        for &(id, _) in super::settings::OPTION_DEFAULTS {
+        let dousei = self.sound.is_voice_slot(25);
+        for (id, _) in super::settings::option_defaults(dousei) {
             let value = &mut system.flags[id as usize];
             *value = match id {
                 2 | 3 | 11 | 12 | 13 | 16 | 19 => (*value).clamp(0, 1),
@@ -111,12 +112,12 @@ impl Runtime {
                 4 => (*value).clamp(0, 66),
                 5 => (*value).clamp(0, 6600),
                 30..=35 => (*value).clamp(0, 255),
-                100..=104 | 110..=121 => (*value).clamp(0, 1000),
+                100..=104 | 110..=124 => (*value).clamp(0, 1000),
                 _ => *value,
             };
         }
         if system.flags[60] == 0 {
-            for &(id, value) in super::settings::OPTION_DEFAULTS {
+            for (id, value) in super::settings::option_defaults(dousei) {
                 system.flags[id as usize] = value;
             }
             system.flags[60] = 1;

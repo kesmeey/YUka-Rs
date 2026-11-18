@@ -58,6 +58,9 @@ if ($CheckTools) {
     $tools
     return
 }
+if ($bundled -and $bundle.id -ceq 'dousei-cn' -and [string]::IsNullOrWhiteSpace($IconExecutable)) {
+    throw 'The Dousei APK requires -IconExecutable pointing to the original game EXE.'
+}
 $signingDirectory = Join-Path $project 'bin'
 $delivery = if ([string]::IsNullOrWhiteSpace($ApkOutputDirectory)) { $signingDirectory }
     else { [IO.Path]::GetFullPath($ApkOutputDirectory, $project) }

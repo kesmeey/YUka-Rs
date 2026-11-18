@@ -8,11 +8,13 @@
 
 ## 《同居情侣热恋中》FD 安卓版
 
-`bin/Dousei-Loverable-Yuka-Rs-0.2.7.apk` 是用户提供的汉化 FD 资源与 Yuka-Rs 运行时的完整安装包。
+`bin/Dousei-Loverable-Yuka-Rs-0.2.8.apk` 是用户提供的汉化 FD 资源与 Yuka-Rs 运行时的完整安装包。
 FD 使用独立的 `org.yukars.dousei` 包名及存档目录，可以和《情侣热恋中》本篇同时安装。
 从安卓播放器菜单选择角色和 A/B/C 模式后，运行对应的原始剧情脚本。
 支持自动阅读、快进、履历、语音重听、手动与快速存读档，以及剧情的片头、片尾视频。
-FD 的标题、设置和存档菜单使用播放器自己的界面。FD 鉴赏库尚未接入。
+FD 0.2.8 从 `dousei_cn.exe` 读取应用图标。标题、设置、存档和鉴赏使用独立的安卓布局。
+存读档按原版 20 页、每页 5 槽组织，显示原格式缩略图、章节、时间和备注，保护自动存档槽。
+画面、文本、声音和语音设置写入原格式 `System.dat`。鉴赏中的 CG、回想和音乐按游戏的通关进度开放。
 
 首次启动把四个原始 YKC 无损恢复到应用私有目录，约 4.1 GB，后续启动复用已准备的资源。
 建议手机预留至少 12 GB 可用空间。APK 支持 Android 8.0 及以上的 ARM64 和 x86_64 设备。
@@ -24,7 +26,7 @@ $game = 'D:\gal\love loabe\【PC】同居情侣热恋中\【PC】同居情侣热
 $bundle = '.\target\bundled-dousei\assets'
 python .\android\prepare-game.py $game $bundle --profile dousei
 python .\android\prepare-video.py $game $bundle --movie d_loverable_OP.mpg --movie d_loverable_ED.mpg
-.\android\build.ps1 -BundleDirectory $bundle
+.\android\build.ps1 -BundleDirectory $bundle -IconExecutable (Join-Path $game 'dousei_cn.exe')
 ```
 
 四档与两部视频随包提供。原版程序、个人存档和全 CG 配置从本地资源目录分开保留。

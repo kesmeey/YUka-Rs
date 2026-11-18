@@ -13,6 +13,7 @@ import android.graphics.Paint;
 import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.Path;
+import android.graphics.drawable.Drawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Build;
@@ -69,8 +70,10 @@ public final class MainActivity extends Activity {
     private EditText givenField;
     private boolean nameEntry;
     private OriginalSaveMenu slotMenu;
+    private FdSaveMenu fdSlotMenu;
     private OriginalSettingsMenu settingsMenu;
-    private OriginalExtrasMenu extrasMenu;
+    private AlertDialog fdSettingsDialog;
+    private ExtrasMenu extrasMenu;
     private int extrasRequest;
     private OriginalSettingsAssets settingsAssets;
     private Mode settingsReturnMode;
@@ -94,6 +97,8 @@ public final class MainActivity extends Activity {
     private volatile boolean engineFailed;
     private volatile boolean bundledMode;
     private boolean douseiMode;
+    private boolean douseiSelecting;
+    private int douseiRoute = -1;
     private volatile Mode mode = Mode.TITLE;
     private volatile String message = "选择游戏目录，导入 data*.ykc 和 Save";
     private volatile File saveDirectory;
@@ -242,6 +247,7 @@ public final class MainActivity extends Activity {
                 clearSlotMenu();
                 clearSettings();
                 clearExtras();
+                closeDouseiSelection();
                 closeNameEntry();
                 settingsAssets = null;
                 douseiMode = dousei;
@@ -294,6 +300,9 @@ public final class MainActivity extends Activity {
             NativeBridge.command(session, "playback", "manual");
         if (replacing) audio.reset();
         NativeBridge.command(session, operation, argument);
+        // Replays replace the native audio slots. Stop gallery MediaPlayers
+        // after the new replay is accepted and before applying its events.
+        if (operation.equals("extras_replay")) audio.reset();
         if (replacing) engineFailed = false;
     }
 
@@ -326,11 +335,15 @@ public final class MainActivity extends Activity {
     private void begin() {
         if (!nativeReady || busy || actionPending) return;
         if (douseiMode) {
-            new AlertDialog.Builder(this).setTitle("选择角色")
-                .setItems(DOUSEI_ROUTES, (dialog, route) -> selectDouseiVariant(route))
-                .setNegativeButton("取消", null).show();
+            douseiSelecting = true;
+            douseiRoute = -1;
+            gameView.invalidate();
             return;
         }
+        openNameEntry();
+    }
+
+    private void openNameEntry() {
         JSONObject names = gameView.stateObject("player_name");
         familyField.setText(names.optString("family", "爱泽"));
         givenField.setText(names.optString("given", "晴树"));
@@ -342,11 +355,27 @@ public final class MainActivity extends Activity {
         gameView.invalidate();
     }
 
-    private void selectDouseiVariant(int route) {
-        String[] variants = {"A", "B", "C"};
-        new AlertDialog.Builder(this).setTitle(DOUSEI_ROUTES[route] + " · 选择剧情模式")
-            .setItems(variants, (dialog, variant) -> command("new", route + "," + variant, this::resumePlayback))
-            .setNegativeButton("返回", (dialog, which) -> begin()).show();
+    private void closeDouseiSelection() {
+        douseiSelecting = false;
+        douseiRoute = -1;
+    }
+
+    private void backDouseiSelection() {
+        if (douseiRoute >= 0) douseiRoute = -1;
+        else closeDouseiSelection();
+        gameView.invalidate();
+    }
+
+    private void confirmDouseiNavigation(boolean exit) {
+        new AlertDialog.Builder(this).setTitle(exit ? "结束游戏" : "返回标题")
+            .setMessage(exit ? "要结束游戏吗？" : "要返回标题吗？")
+            .setPositiveButton("确定", (dialog, button) -> {
+                if (exit) finish();
+                else command("title", "", () -> {
+                    closeDouseiSelection(); clearSlotMenu(); clearSettings(); clearHistory();
+                    mode = Mode.TITLE;
+                });
+            }).setNegativeButton("取消", null).show();
     }
 
     private void confirmName() {
@@ -355,7 +384,8 @@ public final class MainActivity extends Activity {
                 .put("given", givenField.getText().toString().trim());
             command("player_name", names.toString(), () -> {
                 closeNameEntry();
-                startNewGame();
+                if (douseiMode) gameView.invalidate();
+                else startNewGame();
             });
         } catch (org.json.JSONException error) { showError(error); }
     }
@@ -365,6 +395,7 @@ public final class MainActivity extends Activity {
     }
 
     private void resumePlayback() {
+        closeDouseiSelection();
         clearHistory();
         clearSlotMenu();
         clearSettings();
@@ -439,7 +470,8 @@ public final class MainActivity extends Activity {
     private void openSettings(int page) {
         if (!nativeReady || busy || actionPending) return;
         if (douseiMode) {
-            openPlayerSettings();
+            int section = page == 0 ? 0 : page < 3 ? 1 : page == 3 ? 2 : 3;
+            openDouseiSettings(section, null);
             return;
         }
         flushSettings(null);
@@ -476,18 +508,50 @@ public final class MainActivity extends Activity {
     }
 
     private void openPlayerSettings() {
+        openDouseiSettings(preferences.getInt("fd_settings_section", 0), null);
+    }
+
+    private void openDouseiSettings(int section, Runnable returnToMenu) {
+        if (fdSettingsDialog != null) return;
         Mode previous = mode;
         command("pause", "1", () -> {
             if (previous == Mode.PLAYING) mode = Mode.PAUSED;
-            PlayerSettingsDialog.show(this, gameView.settingFlags(), changes -> {
-                if (changes.has("-1")) {
-                    preferences.edit().putBoolean("fullscreen", changes.optInt("-1") != 0).apply();
-                    immersive();
-                    changes.remove("-1");
-                }
-                if (changes.length() > 0) command("settings", changes.toString(), null);
-            }, this::playerTools);
+            preferences.edit().putInt("fd_settings_section", section).apply();
+            JSONObject[] changes = {null};
+            boolean[] tools = {false};
+            fdSettingsDialog = PlayerSettingsDialog.show(this, gameView.settingFlags(), section,
+                patch -> changes[0] = patch, this::previewDouseiSetting, () -> tools[0] = true, () -> {
+                    if (fdSettingsDialog == null || destroyed) return;
+                    fdSettingsDialog = null;
+                    sampleRequest++;
+                    historyAudio.stop();
+                    Runnable next = tools[0] ? this::playerTools : returnToMenu != null ? returnToMenu
+                        : previous == Mode.PLAYING ? this::resumePlayback : gameView::invalidate;
+                    JSONObject patch = changes[0];
+                    if (patch != null && patch.has("-1")) {
+                        preferences.edit().putBoolean("fullscreen", patch.optInt("-1") != 0).apply();
+                        patch.remove("-1");
+                        immersive();
+                    }
+                    if (patch != null && patch.length() > 0) command("settings", patch.toString(), next);
+                    else next.run();
+                });
             gameView.invalidate();
+        });
+    }
+
+    private void previewDouseiSetting(int sample, float gain) {
+        int request = ++sampleRequest;
+        historyAudio.stop();
+        engine.post(() -> {
+            try {
+                JSONArray paths = new JSONObject(NativeBridge.settingsSample(session, sample)).getJSONArray("paths");
+                ui.post(() -> {
+                    if (!destroyed && !background && fdSettingsDialog != null && sampleRequest == request)
+                        historyAudio.play(paths, gain);
+                    else for (int index = 0; index < paths.length(); index++) new File(paths.optString(index)).delete();
+                });
+            } catch (Exception error) { showError(error); }
         });
     }
 
@@ -520,6 +584,9 @@ public final class MainActivity extends Activity {
 
     private void clearSettings() {
         flushSettings(null);
+        AlertDialog dialog = fdSettingsDialog;
+        fdSettingsDialog = null;
+        if (dialog != null) dialog.dismiss();
         settingsMenu = null;
         settingsRequest++;
         sampleRequest++;
@@ -602,13 +669,15 @@ public final class MainActivity extends Activity {
                         ui.post(() -> toast("附加内容将在原版规定的通关条件达成后开放"));
                         return;
                     }
-                    OriginalExtrasMenu loaded = OriginalExtrasMenu.load(session, catalogue, new OriginalExtrasMenu.Listener() {
+                    ExtrasMenu.Listener listener = new ExtrasMenu.Listener() {
                         public void close() { closeExtras(); }
                         public void image(int group, int item, int variant) { extrasImage(group, item, variant); }
                         public void replay(int group, int item, int style) { extrasReplay(group, item, style); }
                         public void music(int track) { command("extras_music", Integer.toString(track), null); }
-                    });
-                    NativeBridge.command(session, "extras_music", "22");
+                    };
+                    ExtrasMenu loaded = douseiMode ? DouseiExtrasMenu.load(session, catalogue, listener)
+                        : OriginalExtrasMenu.load(session, catalogue, listener);
+                    NativeBridge.command(session, "extras_music", Integer.toString(catalogue.optInt("default_track", 22)));
                     ui.post(() -> {
                         if (destroyed || request != extrasRequest) { loaded.release(); return; }
                         clearSlotMenu(); clearSettings(); closeNameEntry();
@@ -620,7 +689,7 @@ public final class MainActivity extends Activity {
     }
 
     private void extrasImage(int group, int item, int variant) {
-        OriginalExtrasMenu menu = extrasMenu;
+        ExtrasMenu menu = extrasMenu;
         if (menu == null) return;
         int request = ++extrasRequest;
         engine.post(() -> {
@@ -743,7 +812,10 @@ public final class MainActivity extends Activity {
     private void openSlotMenu(boolean saving) {
         if (saveDirectory == null || busy || actionPending) return;
         if (douseiMode) {
-            openPlayerSlotMenu(saving);
+            Mode previous = fdSlotMenu == null ? mode : slotReturnMode;
+            int page = fdSlotMenu == null ? gameView.stateInteger("save_page", 0) : fdSlotMenu.page();
+            int row = fdSlotMenu == null ? gameView.stateInteger("save_row", 1) : fdSlotMenu.row();
+            openDouseiSlotMenu(saving, previous, page, row);
             return;
         }
         if (gameView.originalAssets == null) return;
@@ -767,30 +839,91 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private void openPlayerSlotMenu(boolean saving) {
-        if (saving && (!gameView.canSave() || engineFailed)) { toast("当前位置无法保存"); return; }
+    private void openDouseiSlotMenu(boolean saving, Mode previous, int page, int row) {
+        boolean canSave = previous != Mode.TITLE && gameView.canSave() && !engineFailed;
+        if (saving && !canSave) { toast("当前位置无法保存"); return; }
         command("pause", "1", () -> {
-            if (mode == Mode.PLAYING) mode = Mode.PAUSED;
-            if (!saving) { savedFileMenu(); return; }
-            File directory = saveDirectory;
-            if (directory == null) return;
-            File[] slots = new File[20];
-            String[] labels = new String[slots.length];
-            for (int index = 0; index < slots.length; index++) {
-                File file = new File(directory, String.format(Locale.ROOT, "savedata.%03d", index + 2));
-                slots[index] = file;
-                labels[index] = file.getName() + (file.isFile() ? " · 已保存" : " · 空闲");
-            }
-            new AlertDialog.Builder(this).setTitle("保存到存档槽").setItems(labels, (dialog, index) -> {
-                File slot = slots[index];
-                if (slot.isFile()) {
-                    new AlertDialog.Builder(this).setTitle("覆盖存档")
-                        .setMessage(slot.getName())
-                        .setPositiveButton("覆盖", (confirm, which) -> save(slot))
-                        .setNegativeButton("取消", null).show();
-                } else save(slot);
-            }).setNegativeButton("取消", null).show();
+            clearSlotMenu(); clearHistory(); clearSettings();
+            slotReturnMode = previous;
+            mode = previous == Mode.TITLE ? Mode.TITLE : Mode.PAUSED;
+            File previousChoice = new File(saveDirectory, "savedata.000");
+            fdSlotMenu = new FdSaveMenu(this, saving, page, row, canSave, previousChoice.isFile(), new FdSaveMenu.Listener() {
+                public void page(int selectedPage, int selectedRow) { readDouseiSavePage(selectedPage, selectedRow); }
+                public void save(File file, String comment, int selectedPage, int selectedRow) {
+                    FdSaveMenu menu = fdSlotMenu;
+                    command("save_selection", selectedPage + "," + selectedRow, () -> {
+                        if (menu == fdSlotMenu) saveDouseiSlot(file, comment, menu);
+                    });
+                }
+                public void load(File file, int selectedPage, int selectedRow) {
+                    FdSaveMenu menu = fdSlotMenu;
+                    command("save_selection", selectedPage + "," + selectedRow,
+                        () -> { if (menu == fdSlotMenu) MainActivity.this.load(file); });
+                }
+                public void action(OriginalSaveMenu.Action action) { douseiSlotAction(action, saving, previous); }
+            });
+            fdSlotMenu.show();
         });
+    }
+
+    private void readDouseiSavePage(int page, int row) {
+        FdSaveMenu menu = fdSlotMenu;
+        File directory = saveDirectory;
+        int request = ++slotRequest;
+        engine.post(() -> {
+            try {
+                NativeBridge.command(session, "save_selection", page + "," + row);
+                OriginalSaveMenu.Slot[] slots = new OriginalSaveMenu.Slot[5];
+                for (int index = 0; index < slots.length; index++)
+                    slots[index] = OriginalSaveMenu.Slot.read(session, directory, page, index + 1);
+                ui.post(() -> {
+                    if (!destroyed && fdSlotMenu == menu && request == slotRequest) menu.updateSlots(page, slots);
+                    else for (OriginalSaveMenu.Slot slot : slots) if (slot.thumbnail != null) slot.thumbnail.recycle();
+                });
+            } catch (RuntimeException error) { showError(error); }
+        });
+    }
+
+    private void saveDouseiSlot(File file, String comment, FdSaveMenu menu) {
+        try {
+            JSONObject argument = new JSONObject().put("path", file.getAbsolutePath()).put("comment", comment);
+            command("save_with_comment", argument.toString(), () -> {
+                if (fdSlotMenu == menu) menu.refresh();
+                toast("存档已保存");
+            });
+        } catch (org.json.JSONException error) { showError(error); }
+    }
+
+    private void douseiSlotAction(OriginalSaveMenu.Action action, boolean saving, Mode previous) {
+        FdSaveMenu menu = fdSlotMenu;
+        if (menu == null) return;
+        if (actionPending) {
+            if (action == OriginalSaveMenu.Action.RETURN) clearSlotMenu();
+            return;
+        }
+        switch (action) {
+            case SAVE: saveMenu(); break;
+            case LOAD: loadMenu(); break;
+            case SCREEN:
+            case TEXT:
+            case SOUND:
+            case VOICE:
+                int section = action == OriginalSaveMenu.Action.SCREEN ? 0 : action == OriginalSaveMenu.Action.TEXT ? 1
+                    : action == OriginalSaveMenu.Action.SOUND ? 2 : 3;
+                int page = menu.page(), row = menu.row();
+                clearSlotMenu();
+                openDouseiSettings(section, () -> openDouseiSlotMenu(saving, previous, page, row));
+                break;
+            case OPTIONS: clearSlotMenu(); playerTools(); break;
+            case PREVIOUS_CHOICE:
+                File file = new File(saveDirectory, "savedata.000");
+                if (file.isFile()) load(file); else toast("尚无前一个选择点的存档");
+                break;
+            case TITLE: command("title", "", () -> { clearSlotMenu(); mode = Mode.TITLE; }); break;
+            case EXIT: clearSlotMenu(); finish(); break;
+            case RETURN: closeSlotMenu(); break;
+            default: throw new IllegalArgumentException("Unknown FD save action");
+        }
     }
 
     private void readSavePage(int page) {
@@ -874,6 +1007,8 @@ public final class MainActivity extends Activity {
 
     private void clearSlotMenu() {
         slotMenu = null;
+        if (fdSlotMenu != null) fdSlotMenu.close();
+        fdSlotMenu = null;
         slotRequest++;
         cancelSaveConfirmation();
     }
@@ -1108,6 +1243,7 @@ public final class MainActivity extends Activity {
         if (busy || actionPending) { toast("正在处理资源，请稍候"); return; }
         if (movieHost != null && movieHost.active()) { movieHost.skip(); return; }
         if (nameEntry) { closeNameEntry(); gameView.invalidate(); return; }
+        if (mode == Mode.TITLE && douseiSelecting) { backDouseiSelection(); return; }
         if (extrasMenu != null) { extrasMenu.back(); gameView.invalidate(); return; }
         if (settingsMenu != null) {
             if (settingsMenu.confirming()) { settingsMenu.cancelConfirmation(); gameView.invalidate(); }
@@ -1125,10 +1261,12 @@ public final class MainActivity extends Activity {
                 gameView.hideText = !gameView.hideText;
                 command("playback", "manual", null);
                 gameView.invalidate();
-            } else openSettings(preferences.getInt("settings_page", 0));
+            } else if (douseiMode) pauseMenu();
+            else openSettings(preferences.getInt("settings_page", 0));
         }
         else if (mode == Mode.PAUSED && !engineFailed) resumePlayback();
         else if (mode == Mode.PAUSED) command("title", "", () -> mode = Mode.TITLE);
+        else if (douseiMode) confirmDouseiNavigation(true);
         else finish();
     }
 
@@ -1181,6 +1319,7 @@ public final class MainActivity extends Activity {
         flushSettings(null);
         ui.removeCallbacks(settingsFlush);
         destroyed = true;
+        clearSlotMenu(); clearSettings(); clearExtras();
         if (movieHost != null) movieHost.close();
         historyAudio.stop();
         if (engine != null) {
@@ -1199,6 +1338,7 @@ public final class MainActivity extends Activity {
         private final Bitmap bitmap = Bitmap.createBitmap(WIDTH, HEIGHT, Bitmap.Config.ARGB_8888);
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private final TextPaint textPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+        private final Drawable appIcon = getApplicationInfo().loadIcon(getPackageManager());
         private JSONObject state = new JSONObject();
         private final List<Button> buttons = new ArrayList<>();
         private volatile OriginalAssets originalAssets;
@@ -1384,7 +1524,7 @@ public final class MainActivity extends Activity {
 
         private void drawPlayerControls(Canvas canvas, boolean canSave) {
             String playback = state.optString("playback", "manual");
-            add(canvas, "设置", 12, 568, 81, 30, nativeReady, MainActivity.this::openPlayerSettings);
+            add(canvas, "菜单", 12, 568, 81, 30, nativeReady, MainActivity.this::pauseMenu);
             add(canvas, "快存", 99, 568, 81, 30, canSave, MainActivity.this::quickSave);
             add(canvas, "快读", 186, 568, 81, 30, nativeReady, MainActivity.this::quickLoad);
             add(canvas, "存档", 273, 568, 81, 30, canSave, MainActivity.this::saveMenu);
@@ -1399,14 +1539,11 @@ public final class MainActivity extends Activity {
         private void drawMenu(Canvas canvas) {
             boolean canSave = state.optBoolean("can_save") && !busy && !engineFailed;
             if (mode == Mode.TITLE && douseiMode) {
-                rect(canvas, 0, 0, WIDTH, HEIGHT, 0xff101c2c);
-                text(canvas, "同居情侣热恋中", 210, 176, 40, Color.WHITE);
-                add(canvas, "开始游戏", 210, 232, 380, 48, nativeReady, MainActivity.this::begin);
-                add(canvas, "读取存档", 210, 292, 380, 48, nativeReady, MainActivity.this::loadMenu);
-                add(canvas, "播放 OP 视频", 210, 352, 380, 48, nativeReady,
-                    () -> command("movie_play", "avi/d_loverable_OP.mpg", null));
-                add(canvas, "播放设置", 210, 412, 380, 48, nativeReady, MainActivity.this::openPlayerSettings);
-                add(canvas, "退出", 210, 472, 380, 48, true, MainActivity.this::finish);
+                drawDouseiTitle(canvas);
+                return;
+            }
+            if (mode == Mode.PAUSED && douseiMode) {
+                drawDouseiPause(canvas, canSave);
                 return;
             }
             if (mode == Mode.TITLE) {
@@ -1442,8 +1579,89 @@ public final class MainActivity extends Activity {
                 add(canvas, "返回标题", 210, 390, 380, 42, nativeReady,
                     () -> command("title", "", () -> mode = Mode.TITLE));
                 add(canvas, "导出完整存档目录", 210, 438, 380, 42, nativeReady, MainActivity.this::exportSaves);
-                if (douseiMode) add(canvas, "播放设置", 210, 486, 380, 42, nativeReady, MainActivity.this::openPlayerSettings);
             }
+        }
+
+        private void drawDouseiPause(Canvas canvas, boolean canSave) {
+            rect(canvas, 0, 0, WIDTH, HEIGHT, 0xc10e1727);
+            roundPanel(canvas, 42, 55, 716, 488, 22, 0xf71a293e);
+            text(canvas, "游戏菜单", 72, 112, 31, Color.WHITE);
+            int lx = 72, rx = 408, width = 320;
+            douseiButton(canvas, "返回游戏", lx, 136, width, 56, true, nativeReady && !engineFailed, MainActivity.this::resumePlayback);
+            douseiButton(canvas, "保存进度", lx, 203, width, 49, false, canSave, MainActivity.this::saveMenu);
+            douseiButton(canvas, "读取进度", lx, 263, width, 49, false, nativeReady, MainActivity.this::loadMenu);
+            douseiButton(canvas, "快速保存", lx, 323, 154, 46, false, canSave, MainActivity.this::quickSave);
+            douseiButton(canvas, "快速读取", lx + 166, 323, 154, 46, false, quickSaveFile() != null, MainActivity.this::quickLoad);
+            File choice = saveDirectory == null ? null : new File(saveDirectory, "savedata.000");
+            douseiButton(canvas, "回到上个选择", lx, 381, width, 49, false, choice != null && choice.isFile(), () -> {
+                new AlertDialog.Builder(MainActivity.this).setTitle("回到上个选择")
+                    .setMessage("读取上一个选择点的存档？")
+                    .setPositiveButton("读取", (dialog, button) -> load(choice)).setNegativeButton("取消", null).show();
+            });
+            douseiButton(canvas, "返回标题", lx, 443, 154, 49, false, nativeReady, () -> confirmDouseiNavigation(false));
+            douseiButton(canvas, "结束游戏", lx + 166, 443, 154, 49, false, true, () -> confirmDouseiNavigation(true));
+            String[] categories = {"画面设置", "文本设置", "声音设置", "语音设置"};
+            for (int index = 0; index < categories.length; index++) {
+                int section = index;
+                douseiButton(canvas, categories[index], rx, 136 + index * 63, width, 49, false, nativeReady,
+                    () -> openDouseiSettings(section, null));
+            }
+            douseiButton(canvas, "安卓工具", rx, 388, width, 49, false, nativeReady, MainActivity.this::playerTools);
+        }
+
+        private void drawDouseiTitle(Canvas canvas) {
+            rect(canvas, 0, 0, WIDTH, HEIGHT, 0xff0e1727);
+            roundPanel(canvas, 40, 48, 338, 504, 24, 0xff17273b);
+            appIcon.setBounds(78, 119, 190, 231);
+            appIcon.draw(canvas);
+            text(canvas, "同居情侣热恋中", 78, 296, 35, Color.WHITE);
+            text(canvas, "Dousei Loverable", 79, 335, 19, 0xffabbcd0);
+            if (douseiSelecting) {
+                text(canvas, douseiRoute < 0 ? "选择角色" : DOUSEI_ROUTES[douseiRoute], 414, 108, 28, Color.WHITE);
+                if (douseiRoute < 0) {
+                    for (int route = 0; route < DOUSEI_ROUTES.length; route++) {
+                        int selected = route;
+                        douseiButton(canvas, DOUSEI_ROUTES[route], 414, 131 + route * 61, 344, 49, false, true,
+                            () -> { douseiRoute = selected; invalidate(); });
+                    }
+                } else {
+                    for (int variant = 0; variant < 3; variant++) {
+                        int selected = variant;
+                        douseiButton(canvas, "模式 " + (char)('A' + variant), 414, 136 + variant * 71, 344, 57, false, true,
+                            () -> command("new", douseiRoute + "," + selected, MainActivity.this::resumePlayback));
+                    }
+                    douseiButton(canvas, "修改主角姓名", 414, 365, 344, 51, false, true, MainActivity.this::openNameEntry);
+                }
+                douseiButton(canvas, "返回", 414, 462, 155, 49, false, true, MainActivity.this::backDouseiSelection);
+                return;
+            }
+            douseiButton(canvas, "开始游戏", 414, 85, 344, 62, true, nativeReady, MainActivity.this::begin);
+            douseiButton(canvas, "读取存档", 414, 159, 344, 55, false, nativeReady, MainActivity.this::loadMenu);
+            douseiButton(canvas, "选项设置", 414, 226, 344, 55, false, nativeReady, MainActivity.this::openPlayerSettings);
+            boolean unlocked = state.optBoolean("extras_enabled");
+            douseiButton(canvas, unlocked ? "鉴赏" : "鉴赏 · 通关后开放", 414, 293, 344, 55, false,
+                nativeReady && unlocked, MainActivity.this::openExtras);
+            douseiButton(canvas, "播放片头", 414, 360, 344, 55, false, nativeReady,
+                () -> command("movie_play", "avi/d_loverable_OP.mpg", null));
+            douseiButton(canvas, "结束游戏", 414, 427, 344, 55, false, true, () -> confirmDouseiNavigation(true));
+        }
+
+        private void roundPanel(Canvas canvas, float x, float y, float w, float h, float radius, int color) {
+            paint.setColor(color);
+            canvas.drawRoundRect(x, y, x + w, y + h, radius, radius, paint);
+            paint.setColor(Color.WHITE);
+        }
+
+        private void douseiButton(Canvas canvas, String title, float x, float y, float w, float h,
+                boolean primary, boolean enabled, Runnable action) {
+            RectF bounds = new RectF(x, y, x + w, y + h);
+            boolean active = enabled && !busy && !actionPending;
+            int color = active ? (primary ? 0xff8cd9ee : 0xff243951) : 0xff182537;
+            if (active && bounds.contains(pressedX, pressedY)) color = primary ? 0xffb4e6f6 : 0xff365571;
+            roundPanel(canvas, x, y, w, h, 12, color);
+            text(canvas, title, x + 20, y + h / 2 + 8, 22,
+                active ? (primary ? 0xff0e1727 : Color.WHITE) : 0xff8ba0b8);
+            buttons.add(new Button(bounds, active, action));
         }
 
         private void originalImage(Canvas canvas, String name, int sequence, float x, float y, int alpha) {
@@ -1457,6 +1675,19 @@ public final class MainActivity extends Activity {
         }
 
         private void drawNameEntry(Canvas canvas) {
+            if (douseiMode) {
+                rect(canvas, 0, 0, WIDTH, HEIGHT, 0xff0e1727);
+                roundPanel(canvas, 94, 115, 612, 390, 24, 0xff18293e);
+                text(canvas, "主角姓名", 134, 186, 34, Color.WHITE);
+                text(canvas, "姓氏", 134, 244, 20, 0xffabbcd0);
+                text(canvas, "名字", 428, 244, 20, 0xffabbcd0);
+                roundPanel(canvas, 120, 254, 262, 65, 12, 0xff2b4058);
+                roundPanel(canvas, 414, 254, 262, 65, 12, 0xff2b4058);
+                douseiButton(canvas, "确定", 134, 394, 239, 52, true, true, MainActivity.this::confirmName);
+                douseiButton(canvas, "取消", 428, 394, 239, 52, false, true,
+                    () -> { closeNameEntry(); invalidate(); });
+                return;
+            }
             originalImage(canvas, "name_input", -1, 0, 0, 255);
             originalButton(canvas, "YesNo_btn", 0, 2, "确定", 200, 391, 166, 42, true, MainActivity.this::confirmName);
             originalButton(canvas, "YesNo_btn", 1, 3, "取消", 434, 391, 166, 42, true,
