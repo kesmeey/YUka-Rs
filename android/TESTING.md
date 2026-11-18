@@ -23,12 +23,18 @@ Java异步准备回调的requested、slot身份和generation保护经只读代�
 确认仅当前页语音处于播放状态且BGM保留。该测试静音运行，验证脚本和音频状态，不代表已试听设备输出。
 `cargo fmt --check` 和 `cargo clippy --all-targets --locked -- -D warnings` 通过。
 
-最终完整APK大小3,183,326,629字节（约3.18GB / 2.97GiB），SHA-256为
+2026-11-17构建的完整APK大小3,183,326,629字节（约3.18GB / 2.97GiB），SHA-256为
 `ACDAE381861E49CE2FC9F6C9B59A3ADA5FBF0D693A7C02E2F08A3BFA523F80F5`。
 v2/v3签名与16KiB ELF/APK对齐校验通过。两个ABI的包内引擎逐字节匹配本次0.2.6编译输出，
 包内完整资源清单与源清单相同，更新包限制标记未启用。
 包内五份XZ及OP视频的长度、流式SHA-256逐项匹配源清单；视频保持STORED便于直接播放。
 签名证书与旧包相同，打包成功后临时unsigned/aligned APK已删除，没有V4 idsig残留。
+
+2026-11-18使用同一源码提交 `e00a7ff` 重新生成同名完整APK，大小仍为3,183,326,629字节，最新SHA-256为
+`D3F52AC1D37E7111983A555BCDD3D1F2A7D8338514AA7CD562CC3B676C29CAE3`。
+五份XZ与OP的流式SHA/长度、完整资源清单、0.2.6/code7、同签名及APK/ELF的16KiB对齐重新验收通过。
+两份ABI引擎逐字节匹配编译输出，其SHA与11月17日构建一致；未夹带个人存档或签名密钥。
+本次格式和Clippy检查通过，未安装到手机，未重复实机测试。校验文件随APK保存在 `bin/`。
 
 ## 手机震屏报错修复 0.2.5
 
