@@ -2,6 +2,25 @@
 
 `tests/` 构建为独立的 `org.yukars.player.tests` instrumentation APK。测试在播放器应用 UID 下执行真实 JNI，会创建测试存档和音频缓存。
 
+## FD 0.2.9 重新构建（2026-11-21）
+
+按提交 `32c96a64d52d960d46c7ae89fa883e6f973aea34` 及其锁文件重新编译，保留 versionName `0.2.9`、
+versionCode `10`、包名 `org.yukars.dousei` 和原签名，没有功能变更。
+完整 APK 为 3,161,875,888 字节，SHA-256：
+`E471BB404467288D1ED1422CB4E097F474E7511ACEA5A730E375E5B4AE24122A`。
+
+此前 F: 的构建缓存及 SDK 已被清理，本次从原始游戏重新准备四个 XZ 和两部视频，
+两份资源清单的 SHA-256 与上次 0.2.9 相同。恢复 API36、build-tools36.0.0、NDK29.0.14206865，
+使用原 JDK、XZ1.12 和开发签名。工具位于 `F:\llvm-agent-galgame-work\yuka-rs-cache\android-sdk`，
+构建时通过 `-SdkRoot` 指定。
+
+由于 E: 空间不足，成品实际存放在
+`F:\llvm-agent-galgame-work\yuka-rs-cache\deliverables\Dousei-Loverable-Yuka-Rs-0.2.9.apk`，
+项目 `bin/` 下同名入口为指向该文件的符号链接，不保留重复的大文件。
+构建后清除 unsigned/aligned 中间 APK，保留可复用的工具和资源缓存。
+Rust 格式检查、Clippy、59 项库测试通过；独立校验通过签名、版本、PE5 图标、全部资源及两份原生库的 16 KiB 对齐。
+两份原生库的 SHA-256 与此前 0.2.9 相同。本轮未向手机或模拟器安装应用。
+
 ## FD 0.2.9 原版界面
 
 本版替换 0.2.8 的自绘 FD 界面。标题、五位女主角、三种模式、姓名输入、八页选项、存读档、
